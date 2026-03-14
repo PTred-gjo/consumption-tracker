@@ -1,0 +1,6 @@
+{
+  "appId": "com.petrb.fuelpilot",
+  "appName": "FuelPilot",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}
