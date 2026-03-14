@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">FuelPilot</string>
+    <string name="title_activity_main">FuelPilot</string>
+    <string name="package_name">com.petrb.fuelpilot</string>
+    <string name="custom_url_scheme">com.petrb.fuelpilot</string>
+</resources>
