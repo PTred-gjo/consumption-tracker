@@ -942,6 +942,13 @@ function RefuelRow({ entry, currency, onEdit, onDelete }) {
             {entry.station && <span>📍 {entry.station}</span>}
           </div>
           {entry.note && <div style={{ color: COLORS.textMuted, fontSize: 12, marginTop: 3, fontStyle: 'italic' }}>💬 {entry.note}</div>}
+          {entry.photo && (
+            <img
+              src={entry.photo}
+              alt="Receipt"
+              style={{ marginTop: 8, width: '100%', maxHeight: 160, objectFit: 'cover', borderRadius: 8, border: `1px solid ${COLORS.borderLight}` }}
+            />
+          )}
         </div>
       </SwipeableRow>
       <LongPressMenu
@@ -963,6 +970,15 @@ export default function App() {
   const [consumptionTargetInput, setConsumptionTargetInput] = useState('');
   const [rangeFrom, setRangeFrom] = useState('');
   const [rangeTo, setRangeTo] = useState('');
+  // History filter state (feature 10)
+  const [historySearch, setHistorySearch] = useState('');
+  const [historyDateFrom, setHistoryDateFrom] = useState('');
+  const [historyDateTo, setHistoryDateTo] = useState('');
+  const [historyCostMin, setHistoryCostMin] = useState('');
+  const [historyCostMax, setHistoryCostMax] = useState('');
+  const [historyFilterOpen, setHistoryFilterOpen] = useState(false);
+  // Pagination state (feature 11)
+  const [historyPage, setHistoryPage] = useState(1);
   const [vehicles, setVehicles] = usePersistentState('fuelpilot_vehicles', []);
   const [refuels, setRefuels] = usePersistentState('fuelpilot_refuels', []);
   const [maintenance, setMaintenance] = usePersistentState('fuelpilot_maintenance', []);
@@ -1046,6 +1062,7 @@ export default function App() {
     isFullTank: true,
     station: '',
     note: '',
+    photo: null,
   });
 
   const [maintForm, setMaintForm] = useState({
@@ -1124,6 +1141,7 @@ export default function App() {
       isFullTank: refuelForm.isFullTank,
       station: refuelForm.station.trim(),
       note: refuelForm.note.trim(),
+      photo: refuelForm.photo || null,
       createdAt: Date.now(),
     };
 
@@ -1136,6 +1154,7 @@ export default function App() {
       isFullTank: true,
       station: '',
       note: '',
+      photo: null,
     });
   }
 
@@ -1159,6 +1178,7 @@ export default function App() {
               isFullTank: editRefuelForm.isFullTank,
               station: editRefuelForm.station.trim(),
               note: editRefuelForm.note.trim(),
+              photo: editRefuelForm.photo || null,
             }
           : entry
       )
@@ -1197,6 +1217,7 @@ export default function App() {
       isFullTank: entry.isFullTank,
       station: entry.station || '',
       note: entry.note || '',
+      photo: entry.photo || null,
     });
   }
 
@@ -1290,6 +1311,69 @@ export default function App() {
     () => [...new Set(vehicleRefuels.map((r) => r.station).filter(Boolean))],
     [vehicleRefuels]
   );
+
+  const HISTORY_PAGE_SIZE = 10;
+
+  // Sorted newest-first history for the Refuel tab
+  const sortedHistory = useMemo(() => vehicleRefuels.slice().reverse(), [vehicleRefuels]);
+
+  // Filtered history (feature 10)
+  const filteredHistory = useMemo(() => {
+    const search = historySearch.trim().toLowerCase();
+    const costMin = num(historyCostMin);
+    const costMax = num(historyCostMax);
+    return sortedHistory.filter((r) => {
+      if (search) {
+        const stationMatch = (r.station || '').toLowerCase().includes(search);
+        const noteMatch = (r.note || '').toLowerCase().includes(search);
+        if (!stationMatch && !noteMatch) return false;
+      }
+      if (historyDateFrom && r.date < historyDateFrom) return false;
+      if (historyDateTo && r.date > historyDateTo) return false;
+      if (costMin > 0 && r.totalCost < costMin) return false;
+      if (costMax > 0 && r.totalCost > costMax) return false;
+      return true;
+    });
+  }, [sortedHistory, historySearch, historyDateFrom, historyDateTo, historyCostMin, historyCostMax]);
+
+  // Paginated slice (feature 11) — reset page when filters change
+  useEffect(() => { setHistoryPage(1); }, [filteredHistory]);
+
+  const pagedHistory = useMemo(
+    () => filteredHistory.slice(0, historyPage * HISTORY_PAGE_SIZE),
+    [filteredHistory, historyPage]
+  );
+
+  const hasMoreHistory = pagedHistory.length < filteredHistory.length;
+
+  const historyFiltersActive = Boolean(historySearch || historyDateFrom || historyDateTo || historyCostMin || historyCostMax);
+
+  function clearHistoryFilters() {
+    setHistorySearch('');
+    setHistoryDateFrom('');
+    setHistoryDateTo('');
+    setHistoryCostMin('');
+    setHistoryCostMax('');
+  }
+
+  // Duplicate last refuel (feature 12)
+  function duplicateLastRefuel() {
+    if (!sortedHistory.length) return;
+    const last = sortedHistory[0];
+    setRefuelForm((prev) => ({
+      ...prev,
+      station: last.station || '',
+      pricePerLiter: String(last.pricePerLiter),
+    }));
+  }
+
+  // Read a file input as base64 data URL (feature 14)
+  function readPhotoFile(file, onDone) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => onDone(ev.target.result);
+    reader.readAsDataURL(file);
+  }
 
   function exportCSV() {
     if (!vehicleRefuels.length) return;
@@ -1626,19 +1710,102 @@ export default function App() {
                   <Label>Note</Label>
                   <Input value={refuelForm.note} onChange={(e) => setRefuelForm((prev) => ({ ...prev, note: e.target.value }))} />
                 </div>
-                <Button type="submit" style={{ width: '100%', marginTop: 2 }}>Save refuel</Button>
+                {/* Receipt photo (feature 14) */}
+                <div>
+                  <Label>Receipt photo</Label>
+                  {refuelForm.photo ? (
+                    <div style={{ position: 'relative', display: 'inline-block', width: '100%' }}>
+                      <img src={refuelForm.photo} alt="Receipt" style={{ width: '100%', maxHeight: 160, objectFit: 'cover', borderRadius: 8, border: `1px solid ${COLORS.borderLight}` }} />
+                      <button
+                        type="button"
+                        onClick={() => setRefuelForm((prev) => ({ ...prev, photo: null }))}
+                        style={{ position: 'absolute', top: 6, right: 6, background: COLORS.danger, border: 'none', borderRadius: 999, color: '#fff', width: 22, height: 22, fontSize: 12, cursor: 'pointer', lineHeight: '22px', padding: 0 }}
+                        title="Remove photo"
+                      >✕</button>
+                    </div>
+                  ) : (
+                    <Input
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      onChange={(e) => readPhotoFile(e.target.files?.[0], (data) => setRefuelForm((prev) => ({ ...prev, photo: data })))}
+                    />
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 2 }}>
+                  <Button type="submit" style={{ flex: 1 }}>Save refuel</Button>
+                  {sortedHistory.length > 0 && (
+                    <Button type="button" variant="secondary" onClick={duplicateLastRefuel} title="Pre-fill station and price from last entry">
+                      ♻️ Duplicate last
+                    </Button>
+                  )}
+                </div>
               </form>
             </Card>
 
-            {/* Refuel history */}
+            {/* Refuel history (feature 10 filter + feature 11 pagination) */}
             <Card>
-              <SectionTitle icon="📋">Refuel history</SectionTitle>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: historyFilterOpen ? 12 : 0 }}>
+                <SectionTitle icon="📋" style={{ margin: 0 }}>Refuel history</SectionTitle>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {historyFiltersActive && (
+                    <Button type="button" variant="ghost" size="small" onClick={clearHistoryFilters}>✕ Clear</Button>
+                  )}
+                  <Button
+                    type="button"
+                    variant={historyFilterOpen ? 'primary' : 'secondary'}
+                    size="small"
+                    onClick={() => setHistoryFilterOpen((o) => !o)}
+                  >
+                    🔍 Filter
+                  </Button>
+                </div>
+              </div>
+
+              {historyFilterOpen && (
+                <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
+                  <div>
+                    <Label>Search station / note</Label>
+                    <Input
+                      placeholder="e.g. Shell, highway…"
+                      value={historySearch}
+                      onChange={(e) => setHistorySearch(e.target.value)}
+                    />
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <div>
+                      <Label>Date from</Label>
+                      <Input type="date" value={historyDateFrom} onChange={(e) => setHistoryDateFrom(e.target.value)} />
+                    </div>
+                    <div>
+                      <Label>Date to</Label>
+                      <Input type="date" value={historyDateTo} onChange={(e) => setHistoryDateTo(e.target.value)} />
+                    </div>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <div>
+                      <Label>Cost min ({currency})</Label>
+                      <Input type="number" step="0.01" placeholder="0" value={historyCostMin} onChange={(e) => setHistoryCostMin(e.target.value)} />
+                    </div>
+                    <div>
+                      <Label>Cost max ({currency})</Label>
+                      <Input type="number" step="0.01" placeholder="∞" value={historyCostMax} onChange={(e) => setHistoryCostMax(e.target.value)} />
+                    </div>
+                  </div>
+                  {historyFiltersActive && (
+                    <div style={{ fontSize: 12, color: COLORS.textSecondary }}>
+                      Showing {filteredHistory.length} of {vehicleRefuels.length} refuels
+                    </div>
+                  )}
+                </div>
+              )}
+
               {!vehicleRefuels.length && <EmptyState icon="⛽" message="No refuel entries yet. Add your first fill-up above!" />}
+              {vehicleRefuels.length > 0 && filteredHistory.length === 0 && (
+                <EmptyState icon="🔍" message="No refuels match the current filter." />
+              )}
               <div style={{ display: 'grid', gap: 8 }}>
-                {vehicleRefuels
-                  .slice()
-                  .reverse()
-                  .map((entry) => (
+                {pagedHistory.map((entry) => (
                     <RefuelRow
                       key={entry.id}
                       entry={entry}
@@ -1648,6 +1815,16 @@ export default function App() {
                     />
                   ))}
               </div>
+              {hasMoreHistory && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => setHistoryPage((p) => p + 1)}
+                  style={{ width: '100%', marginTop: 8 }}
+                >
+                  Load more ({filteredHistory.length - pagedHistory.length} remaining)
+                </Button>
+              )}
             </Card>
               </>
             )}
@@ -2218,6 +2395,28 @@ export default function App() {
             <div>
               <Label>Note</Label>
               <Input value={editRefuelForm.note} onChange={(e) => setEditRefuelForm((prev) => ({ ...prev, note: e.target.value }))} />
+            </div>
+            {/* Receipt photo in edit modal (feature 14) */}
+            <div>
+              <Label>Receipt photo</Label>
+              {editRefuelForm.photo ? (
+                <div style={{ position: 'relative', display: 'inline-block', width: '100%' }}>
+                  <img src={editRefuelForm.photo} alt="Receipt" style={{ width: '100%', maxHeight: 160, objectFit: 'cover', borderRadius: 8, border: `1px solid ${COLORS.borderLight}` }} />
+                  <button
+                    type="button"
+                    onClick={() => setEditRefuelForm((prev) => ({ ...prev, photo: null }))}
+                    style={{ position: 'absolute', top: 6, right: 6, background: COLORS.danger, border: 'none', borderRadius: 999, color: '#fff', width: 22, height: 22, fontSize: 12, cursor: 'pointer', lineHeight: '22px', padding: 0 }}
+                    title="Remove photo"
+                  >✕</button>
+                </div>
+              ) : (
+                <Input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={(e) => readPhotoFile(e.target.files?.[0], (data) => setEditRefuelForm((prev) => ({ ...prev, photo: data })))}
+                />
+              )}
             </div>
             <Button onClick={saveEditRefuel} style={{ width: '100%', marginTop: 4 }}>Save changes</Button>
           </div>
