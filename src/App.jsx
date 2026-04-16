@@ -128,6 +128,8 @@ function computeConsumptionSeries(refuels) {
             date: entry.date,
             odometer: entry.odometer,
             value: (accumulatedLiters / distance) * 100,
+            liters: accumulatedLiters,
+            distance,
           });
         }
       }
@@ -163,9 +165,15 @@ function computeStats(refuels) {
   const lastEntry = refuels[refuels.length - 1];
 
   const consumptionSeries = computeConsumptionSeries(refuels);
-  const avgConsumption = consumptionSeries.length
-    ? consumptionSeries.reduce((sum, item) => sum + item.value, 0) / consumptionSeries.length
-    : 0;
+
+  // Distance-weighted average consumption: total fuel consumed / total distance × 100
+  let avgConsumption = 0;
+  if (consumptionSeries.length) {
+    const totalSeriesFuel = consumptionSeries.reduce((sum, p) => sum + p.liters, 0);
+    const totalSeriesDist = consumptionSeries.reduce((sum, p) => sum + p.distance, 0);
+    avgConsumption = totalSeriesDist > 0 ? (totalSeriesFuel / totalSeriesDist) * 100 : 0;
+  }
+
   const lastConsumption = consumptionSeries.length
     ? consumptionSeries[consumptionSeries.length - 1].value
     : 0;
@@ -173,14 +181,21 @@ function computeStats(refuels) {
   const totalCost = refuels.reduce((sum, entry) => sum + entry.totalCost, 0);
   const totalLiters = refuels.reduce((sum, entry) => sum + entry.liters, 0);
   const totalDistance = Math.max(0, lastEntry.odometer - firstEntry.odometer);
-  const avgCostPerKm = totalDistance > 0 ? totalCost / totalDistance : 0;
 
+  // Exclude the first refuel's cost: it establishes the odometer baseline and the
+  // fuel in it was consumed *before* the tracked distance begins.
+  const costForTrackedDistance = refuels.length > 1 ? totalCost - firstEntry.totalCost : 0;
+  const avgCostPerKm = totalDistance > 0 ? costForTrackedDistance / totalDistance : 0;
+
+  // Cost per km for the last measured segment: last consumption × last price per litre ÷ 100
   let lastCostPerKm = 0;
-  if (refuels.length > 1) {
-    const prev = refuels[refuels.length - 2];
-    const distance = lastEntry.odometer - prev.odometer;
-    if (distance > 0) {
-      lastCostPerKm = lastEntry.totalCost / distance;
+  if (consumptionSeries.length > 0) {
+    const lastPoint = consumptionSeries[consumptionSeries.length - 1];
+    const matchingEntry = refuels.find(
+      (r) => r.isFullTank && r.odometer === lastPoint.odometer && r.date === lastPoint.date
+    );
+    if (matchingEntry) {
+      lastCostPerKm = (lastPoint.value * matchingEntry.pricePerLiter) / 100;
     }
   }
 
