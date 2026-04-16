@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import Chart from 'chart.js/auto';
 
 const COLORS = {
@@ -6,21 +6,24 @@ const COLORS = {
   surface: '#141414',
   surfaceElevated: '#1C1C1E',
   accent: '#3B82F6',
+  accentLight: '#60A5FA',
   success: '#30D158',
   danger: '#FF453A',
+  dangerBg: '#FF453A1a',
   warning: '#E8A838',
   textPrimary: '#F5F5F3',
   textSecondary: '#8E8E93',
   textMuted: '#555558',
   border: '#2C2C2E',
   borderLight: '#1C1C1E',
+  overlay: 'rgba(0,0,0,0.65)',
 };
 
 const TAB_ITEMS = [
-  { key: 'refuel', label: '⛽ Refuel' },
-  { key: 'stats', label: '📊 Stats' },
-  { key: 'maintenance', label: '🔧 Maint' },
-  { key: 'settings', label: '⚙ Settings' },
+  { key: 'refuel', icon: '⛽', label: 'Refuel' },
+  { key: 'stats', icon: '📊', label: 'Stats' },
+  { key: 'maintenance', icon: '🔧', label: 'Maint' },
+  { key: 'settings', icon: '⚙', label: 'Settings' },
 ];
 
 const CURRENCIES = ['Kč', '€', '$', '£', 'zł', 'kr'];
@@ -32,6 +35,8 @@ const MAINT_TYPES = [
   { value: 'insurance', label: 'Insurance' },
   { value: 'custom', label: 'Custom' },
 ];
+
+const FUEL_LABELS = { diesel: 'Diesel', petrol: 'Petrol', lpg: 'LPG', ev: 'EV' };
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
@@ -121,6 +126,8 @@ function computeStats(refuels) {
       totalDistance: 0,
       lastEntry: null,
       firstEntry: null,
+      totalLiters: 0,
+      refuelCount: 0,
     };
   }
 
@@ -133,6 +140,7 @@ function computeStats(refuels) {
     : 0;
 
   const totalCost = refuels.reduce((sum, entry) => sum + entry.totalCost, 0);
+  const totalLiters = refuels.reduce((sum, entry) => sum + entry.liters, 0);
   const totalDistance = Math.max(0, lastEntry.odometer - firstEntry.odometer);
   const avgCostPerKm = totalDistance > 0 ? totalCost / totalDistance : 0;
 
@@ -179,6 +187,8 @@ function computeStats(refuels) {
     totalDistance,
     lastEntry,
     firstEntry,
+    totalLiters,
+    refuelCount: refuels.length,
   };
 }
 
@@ -217,17 +227,39 @@ function uid(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function Card({ children, style }) {
+/* ─── Reusable UI components ─── */
+
+function Card({ children, style, glow }) {
   return (
     <div
       style={{
         background: COLORS.surface,
         border: `1px solid ${COLORS.borderLight}`,
         borderRadius: 16,
-        padding: 14,
+        padding: 16,
+        transition: 'box-shadow 0.2s',
+        boxShadow: glow ? `0 0 20px ${glow}33` : undefined,
         ...style,
       }}
     >
+      {children}
+    </div>
+  );
+}
+
+function SectionTitle({ icon, children }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        fontWeight: 700,
+        fontSize: 15,
+        marginBottom: 12,
+      }}
+    >
+      {icon && <span style={{ fontSize: 18 }}>{icon}</span>}
       {children}
     </div>
   );
@@ -237,11 +269,12 @@ function Label({ children }) {
   return (
     <div
       style={{
-        fontSize: 12,
+        fontSize: 11,
         letterSpacing: 0.8,
         color: COLORS.textSecondary,
         textTransform: 'uppercase',
-        marginBottom: 6,
+        marginBottom: 5,
+        fontWeight: 600,
       }}
     >
       {children}
@@ -249,20 +282,25 @@ function Label({ children }) {
   );
 }
 
-function Input({ ...props }) {
+function Input({ style: extraStyle, ...props }) {
   return (
     <input
       {...props}
       style={{
         width: '100%',
+        boxSizing: 'border-box',
         border: `1px solid ${COLORS.border}`,
         background: COLORS.surfaceElevated,
         color: COLORS.textPrimary,
         borderRadius: 10,
-        fontSize: 16,
-        padding: '11px 12px',
+        fontSize: 15,
+        padding: '10px 12px',
         outline: 'none',
+        transition: 'border-color 0.2s',
+        ...extraStyle,
       }}
+      onFocus={(e) => { e.target.style.borderColor = COLORS.accent; props.onFocus?.(e); }}
+      onBlur={(e) => { e.target.style.borderColor = COLORS.border; props.onBlur?.(e); }}
     />
   );
 }
@@ -273,13 +311,15 @@ function Select({ children, ...props }) {
       {...props}
       style={{
         width: '100%',
+        boxSizing: 'border-box',
         border: `1px solid ${COLORS.border}`,
         background: COLORS.surfaceElevated,
         color: COLORS.textPrimary,
         borderRadius: 10,
-        fontSize: 16,
-        padding: '11px 12px',
+        fontSize: 15,
+        padding: '10px 12px',
         outline: 'none',
+        transition: 'border-color 0.2s',
       }}
     >
       {children}
@@ -287,10 +327,16 @@ function Select({ children, ...props }) {
   );
 }
 
-function Button({ children, variant = 'primary', style, ...props }) {
-  const palette = variant === 'secondary'
-    ? { background: COLORS.surfaceElevated, color: COLORS.textPrimary, border: COLORS.border }
-    : { background: COLORS.accent, color: '#fff', border: COLORS.accent };
+function Button({ children, variant = 'primary', size = 'normal', style, ...props }) {
+  const palettes = {
+    primary: { background: COLORS.accent, color: '#fff', border: COLORS.accent },
+    secondary: { background: COLORS.surfaceElevated, color: COLORS.textPrimary, border: COLORS.border },
+    danger: { background: COLORS.dangerBg, color: COLORS.danger, border: `${COLORS.danger}44` },
+    success: { background: `${COLORS.success}1a`, color: COLORS.success, border: `${COLORS.success}44` },
+    ghost: { background: 'transparent', color: COLORS.textSecondary, border: 'transparent' },
+  };
+  const palette = palettes[variant] || palettes.primary;
+  const sizeStyles = size === 'small' ? { padding: '6px 10px', fontSize: 12 } : { padding: '10px 14px', fontSize: 14 };
 
   return (
     <button
@@ -301,8 +347,38 @@ function Button({ children, variant = 'primary', style, ...props }) {
         color: palette.color,
         borderRadius: 10,
         fontWeight: 600,
-        padding: '10px 14px',
         cursor: 'pointer',
+        transition: 'opacity 0.15s, transform 0.1s',
+        ...sizeStyles,
+        ...style,
+      }}
+      onMouseDown={(e) => { e.currentTarget.style.transform = 'scale(0.97)'; }}
+      onMouseUp={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
+      onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function IconButton({ children, onClick, title, variant = 'ghost', style }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      style={{
+        background: variant === 'danger' ? COLORS.dangerBg : 'transparent',
+        border: 'none',
+        color: variant === 'danger' ? COLORS.danger : COLORS.textSecondary,
+        cursor: 'pointer',
+        borderRadius: 8,
+        padding: '6px 8px',
+        fontSize: 16,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        transition: 'background 0.15s, color 0.15s',
         ...style,
       }}
     >
@@ -317,13 +393,15 @@ function StatusPill({ color, label }) {
       style={{
         display: 'inline-flex',
         alignItems: 'center',
-        padding: '5px 10px',
+        padding: '4px 10px',
         borderRadius: 999,
-        fontSize: 12,
+        fontSize: 11,
         fontWeight: 700,
+        letterSpacing: 0.3,
         color,
         background: `${color}22`,
-        border: `1px solid ${color}66`,
+        border: `1px solid ${color}55`,
+        textTransform: 'uppercase',
       }}
     >
       {label}
@@ -331,7 +409,111 @@ function StatusPill({ color, label }) {
   );
 }
 
-function ChartCard({ title, labels, values, type = 'line', color = COLORS.accent }) {
+function FuelBadge({ fuelType }) {
+  const fuelColors = { diesel: '#F59E0B', petrol: '#3B82F6', lpg: '#8B5CF6', ev: '#10B981' };
+  const c = fuelColors[fuelType] || COLORS.textSecondary;
+  return (
+    <span
+      style={{
+        fontSize: 10,
+        fontWeight: 700,
+        color: c,
+        background: `${c}22`,
+        border: `1px solid ${c}44`,
+        borderRadius: 6,
+        padding: '2px 6px',
+        textTransform: 'uppercase',
+        letterSpacing: 0.5,
+      }}
+    >
+      {FUEL_LABELS[fuelType] || fuelType}
+    </span>
+  );
+}
+
+function StatBox({ label, value, icon, accent }) {
+  const c = accent || COLORS.accent;
+  return (
+    <div
+      style={{
+        background: `${c}0d`,
+        border: `1px solid ${c}22`,
+        borderRadius: 12,
+        padding: '12px 14px',
+        textAlign: 'center',
+      }}
+    >
+      {icon && <div style={{ fontSize: 20, marginBottom: 4 }}>{icon}</div>}
+      <div style={{ fontSize: 18, fontWeight: 800, color: c, lineHeight: 1.2 }}>{value}</div>
+      <div style={{ fontSize: 11, color: COLORS.textSecondary, marginTop: 3, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+    </div>
+  );
+}
+
+function EmptyState({ icon, message }) {
+  return (
+    <div style={{ textAlign: 'center', padding: '24px 16px' }}>
+      <div style={{ fontSize: 40, marginBottom: 8, opacity: 0.5 }}>{icon}</div>
+      <div style={{ color: COLORS.textSecondary, fontSize: 14 }}>{message}</div>
+    </div>
+  );
+}
+
+function Modal({ open, title, onClose, children }) {
+  if (!open) return null;
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        background: COLORS.overlay,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 9999,
+        padding: 16,
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        style={{
+          background: COLORS.surface,
+          border: `1px solid ${COLORS.border}`,
+          borderRadius: 20,
+          padding: 20,
+          width: '100%',
+          maxWidth: 420,
+          maxHeight: '85vh',
+          overflowY: 'auto',
+          boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <div style={{ fontWeight: 700, fontSize: 17 }}>{title}</div>
+          <IconButton onClick={onClose} title="Close">✕</IconButton>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ConfirmDialog({ open, title, message, confirmLabel, confirmVariant, onConfirm, onCancel }) {
+  return (
+    <Modal open={open} title={title} onClose={onCancel}>
+      <div style={{ color: COLORS.textSecondary, marginBottom: 20, fontSize: 14, lineHeight: 1.5 }}>{message}</div>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <Button variant="secondary" onClick={onCancel}>Cancel</Button>
+        <Button variant={confirmVariant || 'danger'} onClick={onConfirm}>{confirmLabel || 'Confirm'}</Button>
+      </div>
+    </Modal>
+  );
+}
+
+function ChartCard({ title, labels, values, type = 'line', color = COLORS.accent, unit }) {
   const ref = useRef(null);
 
   useEffect(() => {
@@ -346,10 +528,11 @@ function ChartCard({ title, labels, values, type = 'line', color = COLORS.accent
             label: title,
             data: values,
             borderColor: color,
-            backgroundColor: `${color}66`,
+            backgroundColor: type === 'bar' ? `${color}88` : `${color}33`,
             tension: 0.35,
             fill: type === 'line',
             borderWidth: 2,
+            borderRadius: type === 'bar' ? 6 : 0,
           },
         ],
       },
@@ -358,27 +541,37 @@ function ChartCard({ title, labels, values, type = 'line', color = COLORS.accent
         maintainAspectRatio: false,
         plugins: {
           legend: { display: false },
+          tooltip: {
+            backgroundColor: COLORS.surface,
+            titleColor: COLORS.textPrimary,
+            bodyColor: COLORS.textSecondary,
+            borderColor: COLORS.border,
+            borderWidth: 1,
+            cornerRadius: 10,
+            padding: 10,
+            callbacks: unit ? { label: (ctx) => `${ctx.formattedValue} ${unit}` } : undefined,
+          },
         },
         scales: {
           x: {
-            ticks: { color: COLORS.textSecondary },
-            grid: { color: `${COLORS.border}66` },
+            ticks: { color: COLORS.textSecondary, font: { size: 11 } },
+            grid: { color: `${COLORS.border}44` },
           },
           y: {
-            ticks: { color: COLORS.textSecondary },
-            grid: { color: `${COLORS.border}66` },
+            ticks: { color: COLORS.textSecondary, font: { size: 11 } },
+            grid: { color: `${COLORS.border}44` },
           },
         },
       },
     });
 
     return () => chart.destroy();
-  }, [title, labels, values, type, color]);
+  }, [title, labels, values, type, color, unit]);
 
   return (
     <Card>
-      <div style={{ fontWeight: 700, marginBottom: 10 }}>{title}</div>
-      <div style={{ height: 210 }}>
+      <SectionTitle>{title}</SectionTitle>
+      <div style={{ height: 220 }}>
         <canvas ref={ref} />
       </div>
     </Card>
@@ -392,6 +585,16 @@ export default function App() {
   const [maintenance, setMaintenance] = usePersistentState('fuelpilot_maintenance', []);
   const [selectedVehicleId, setSelectedVehicleId] = usePersistentState('fuelpilot_selectedVehicleId', '');
   const [importError, setImportError] = useState('');
+
+  /* Edit / delete modal state */
+  const [editRefuelId, setEditRefuelId] = useState(null);
+  const [editRefuelForm, setEditRefuelForm] = useState(null);
+  const [deleteRefuelId, setDeleteRefuelId] = useState(null);
+  const [editMaintId, setEditMaintId] = useState(null);
+  const [editMaintForm, setEditMaintForm] = useState(null);
+  const [deleteMaintId, setDeleteMaintId] = useState(null);
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const [deleteVehicleId, setDeleteVehicleId] = useState(null);
 
   const selectedVehicle = vehicles.find((x) => x.id === selectedVehicleId) || null;
 
@@ -412,6 +615,11 @@ export default function App() {
   const vehicleMaintenance = useMemo(
     () => (selectedVehicle ? maintenance.filter((x) => x.vehicleId === selectedVehicle.id) : []),
     [maintenance, selectedVehicle]
+  );
+
+  const overdueCount = useMemo(
+    () => vehicleMaintenance.filter((item) => getMaintenanceStatus(item, currentOdometer).key === 'due').length,
+    [vehicleMaintenance, currentOdometer]
   );
 
   const [vehicleForm, setVehicleForm] = useState({
@@ -449,6 +657,8 @@ export default function App() {
     setMaintForm((prev) => ({ ...prev, lastDoneOdometer: currentOdometer || 0 }));
   }, [selectedVehicleId]);
 
+  /* ─── CRUD handlers ─── */
+
   function addVehicle(e) {
     e.preventDefault();
     if (!vehicleForm.name.trim()) return;
@@ -477,6 +687,14 @@ export default function App() {
       currency: entry.currency,
     });
   }
+
+  const deleteVehicle = useCallback((id) => {
+    setVehicles((prev) => prev.filter((v) => v.id !== id));
+    setRefuels((prev) => prev.filter((r) => r.vehicleId !== id));
+    setMaintenance((prev) => prev.filter((m) => m.vehicleId !== id));
+    setSelectedVehicleId((prevId) => (prevId === id ? '' : prevId));
+    setDeleteVehicleId(null);
+  }, [setVehicles, setRefuels, setMaintenance, setSelectedVehicleId]);
 
   function addRefuel(e) {
     e.preventDefault();
@@ -515,6 +733,52 @@ export default function App() {
     });
   }
 
+  function saveEditRefuel() {
+    if (!editRefuelForm) return;
+    const odometer = num(editRefuelForm.odometer);
+    const liters = num(editRefuelForm.liters);
+    const pricePerLiter = num(editRefuelForm.pricePerLiter);
+    if (!odometer || !liters || !pricePerLiter) return;
+
+    setRefuels((prev) =>
+      prev.map((entry) =>
+        entry.id === editRefuelId
+          ? {
+              ...entry,
+              date: editRefuelForm.date,
+              odometer,
+              liters,
+              pricePerLiter,
+              totalCost: liters * pricePerLiter,
+              isFullTank: editRefuelForm.isFullTank,
+              station: editRefuelForm.station.trim(),
+              note: editRefuelForm.note.trim(),
+            }
+          : entry
+      )
+    );
+    setEditRefuelId(null);
+    setEditRefuelForm(null);
+  }
+
+  function confirmDeleteRefuel() {
+    setRefuels((prev) => prev.filter((entry) => entry.id !== deleteRefuelId));
+    setDeleteRefuelId(null);
+  }
+
+  function openEditRefuel(entry) {
+    setEditRefuelId(entry.id);
+    setEditRefuelForm({
+      date: entry.date,
+      odometer: entry.odometer,
+      liters: entry.liters,
+      pricePerLiter: entry.pricePerLiter,
+      isFullTank: entry.isFullTank,
+      station: entry.station || '',
+      note: entry.note || '',
+    });
+  }
+
   function addMaintenance(e) {
     e.preventDefault();
     if (!selectedVehicle) return;
@@ -540,6 +804,58 @@ export default function App() {
       lastDoneAt: todayIso(),
       lastDoneOdometer: currentOdometer || 0,
     }));
+  }
+
+  function openEditMaint(item) {
+    setEditMaintId(item.id);
+    setEditMaintForm({
+      type: item.type,
+      label: item.label,
+      lastDoneAt: item.lastDoneAt,
+      lastDoneOdometer: item.lastDoneOdometer,
+      intervalKm: item.intervalKm,
+      intervalDays: item.intervalDays,
+      cost: item.cost || 0,
+      note: item.note || '',
+    });
+  }
+
+  function saveEditMaint() {
+    if (!editMaintForm) return;
+    setMaintenance((prev) =>
+      prev.map((item) =>
+        item.id === editMaintId
+          ? {
+              ...item,
+              type: editMaintForm.type,
+              label: editMaintForm.label.trim() || MAINT_TYPES.find((x) => x.value === editMaintForm.type)?.label || 'Custom',
+              lastDoneAt: editMaintForm.lastDoneAt,
+              lastDoneOdometer: num(editMaintForm.lastDoneOdometer),
+              intervalKm: num(editMaintForm.intervalKm),
+              intervalDays: num(editMaintForm.intervalDays),
+              cost: num(editMaintForm.cost),
+              note: editMaintForm.note.trim(),
+            }
+          : item
+      )
+    );
+    setEditMaintId(null);
+    setEditMaintForm(null);
+  }
+
+  function confirmDeleteMaint() {
+    setMaintenance((prev) => prev.filter((item) => item.id !== deleteMaintId));
+    setDeleteMaintId(null);
+  }
+
+  function markMaintenanceDone(item) {
+    setMaintenance((prev) =>
+      prev.map((m) =>
+        m.id === item.id
+          ? { ...m, lastDoneAt: todayIso(), lastDoneOdometer: currentOdometer || m.lastDoneOdometer }
+          : m
+      )
+    );
   }
 
   function updateVehicleCurrency(currency) {
@@ -613,28 +929,41 @@ export default function App() {
         style={{
           maxWidth: 720,
           margin: '0 auto',
-          padding: '16px 14px calc(90px + env(safe-area-inset-bottom))',
+          padding: '20px 16px calc(90px + env(safe-area-inset-bottom))',
         }}
       >
-        <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 2 }}>FuelPilot</div>
-        <div style={{ color: COLORS.textSecondary, marginBottom: 16 }}>Smart fuel tracker for real costs per kilometer</div>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+          <span style={{ fontSize: 32 }}>⛽</span>
+          <div style={{ fontSize: 28, fontWeight: 800, background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentLight})`, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>FuelPilot</div>
+        </div>
+        <div style={{ color: COLORS.textSecondary, marginBottom: 18, fontSize: 13, paddingLeft: 2 }}>
+          Smart fuel tracker · real costs per kilometer
+        </div>
 
+        {/* Vehicle selector */}
         {vehicles.length > 0 && (
-          <Card style={{ marginBottom: 12 }}>
-            <Label>Vehicle Selector</Label>
-            <Select value={selectedVehicleId} onChange={(e) => setSelectedVehicleId(e.target.value)}>
-              {vehicles.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name} {v.year ? `(${v.year})` : ''}
-                </option>
-              ))}
-            </Select>
+          <Card style={{ marginBottom: 14, padding: '12px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <Label>Active Vehicle</Label>
+                <Select value={selectedVehicleId} onChange={(e) => setSelectedVehicleId(e.target.value)}>
+                  {vehicles.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.name} {v.year ? `(${v.year})` : ''} — {FUEL_LABELS[v.fuelType] || v.fuelType}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              {selectedVehicle && <FuelBadge fuelType={selectedVehicle.fuelType} />}
+            </div>
           </Card>
         )}
 
+        {/* First vehicle form */}
         {!selectedVehicle && (
-          <Card style={{ marginBottom: 14 }}>
-            <div style={{ fontWeight: 700, marginBottom: 10 }}>Add your first vehicle</div>
+          <Card style={{ marginBottom: 14 }} glow={COLORS.accent}>
+            <SectionTitle icon="🚗">Add your first vehicle</SectionTitle>
             <form onSubmit={addVehicle} style={{ display: 'grid', gap: 10 }}>
               <div>
                 <Label>Name</Label>
@@ -692,41 +1021,44 @@ export default function App() {
                   onChange={(e) => setVehicleForm((prev) => ({ ...prev, tankSize: e.target.value }))}
                 />
               </div>
-              <Button type="submit">Save vehicle</Button>
+              <Button type="submit" style={{ width: '100%', marginTop: 4 }}>Save vehicle</Button>
             </form>
           </Card>
         )}
 
+        {/* ═══ REFUEL TAB ═══ */}
         {selectedVehicle && activeTab === 'refuel' && (
-          <div style={{ display: 'grid', gap: 12 }}>
-            <Card style={{ background: `${COLORS.accent}1f`, border: `1px solid ${COLORS.accent}66` }}>
-              <div style={{ fontWeight: 700, marginBottom: 8 }}>Dashboard</div>
+          <div style={{ display: 'grid', gap: 14 }}>
+            {/* Dashboard */}
+            <Card style={{ background: `linear-gradient(135deg, ${COLORS.accent}18, ${COLORS.accent}08)`, border: `1px solid ${COLORS.accent}33` }}>
+              <SectionTitle icon="📈">Dashboard</SectionTitle>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <div>
-                  <div style={{ color: COLORS.textSecondary, fontSize: 12 }}>Last Fill</div>
-                  <div style={{ fontSize: 18, fontWeight: 700 }}>
-                    {stats.lastEntry ? `${fmt(stats.lastEntry.liters, 1)} L` : '-'}
-                  </div>
-                </div>
-                <div>
-                  <div style={{ color: COLORS.textSecondary, fontSize: 12 }}>Avg Consumption</div>
-                  <div style={{ fontSize: 18, fontWeight: 700 }}>{fmt(stats.avgConsumption)} l/100 km</div>
-                </div>
-                <div>
-                  <div style={{ color: COLORS.textSecondary, fontSize: 12 }}>Avg Cost / km</div>
-                  <div style={{ fontSize: 18, fontWeight: 700 }}>
-                    {fmt(stats.avgCostPerKm)} {currency}
-                  </div>
-                </div>
-                <div>
-                  <div style={{ color: COLORS.textSecondary, fontSize: 12 }}>Distance</div>
-                  <div style={{ fontSize: 18, fontWeight: 700 }}>{fmt(stats.totalDistance, 0)} km</div>
-                </div>
+                <StatBox label="Last Fill" value={stats.lastEntry ? `${fmt(stats.lastEntry.liters, 1)} L` : '-'} accent={COLORS.accent} />
+                <StatBox label="Avg Consumption" value={`${fmt(stats.avgConsumption)} l/100`} accent={COLORS.warning} />
+                <StatBox label="Avg Cost / km" value={`${fmt(stats.avgCostPerKm)} ${currency}`} accent={COLORS.success} />
+                <StatBox label="Total Distance" value={`${fmt(stats.totalDistance, 0)} km`} accent={COLORS.accentLight} />
               </div>
+              {stats.refuelCount > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-around', marginTop: 12, paddingTop: 10, borderTop: `1px solid ${COLORS.border}` }}>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 13, fontWeight: 700 }}>{stats.refuelCount}</div>
+                    <div style={{ fontSize: 10, color: COLORS.textSecondary }}>Refuels</div>
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 13, fontWeight: 700 }}>{fmt(stats.totalLiters, 0)} L</div>
+                    <div style={{ fontSize: 10, color: COLORS.textSecondary }}>Total Fuel</div>
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 13, fontWeight: 700 }}>{fmt(stats.totalCost, 0)} {currency}</div>
+                    <div style={{ fontSize: 10, color: COLORS.textSecondary }}>Total Spent</div>
+                  </div>
+                </div>
+              )}
             </Card>
 
+            {/* Refuel form */}
             <Card>
-              <div style={{ fontWeight: 700, marginBottom: 10 }}>Quick refuel log</div>
+              <SectionTitle icon="⛽">Quick refuel log</SectionTitle>
               <form onSubmit={addRefuel} style={{ display: 'grid', gap: 10 }}>
                 <div>
                   <Label>Date</Label>
@@ -766,6 +1098,7 @@ export default function App() {
                     <Input
                       value={`${fmt(num(refuelForm.liters) * num(refuelForm.pricePerLiter), 2)} ${currency}`}
                       readOnly
+                      style={{ color: COLORS.textSecondary }}
                     />
                   </div>
                 </div>
@@ -789,13 +1122,14 @@ export default function App() {
                   <Label>Note</Label>
                   <Input value={refuelForm.note} onChange={(e) => setRefuelForm((prev) => ({ ...prev, note: e.target.value }))} />
                 </div>
-                <Button type="submit">Save refuel</Button>
+                <Button type="submit" style={{ width: '100%', marginTop: 2 }}>Save refuel</Button>
               </form>
             </Card>
 
+            {/* Refuel history */}
             <Card>
-              <div style={{ fontWeight: 700, marginBottom: 10 }}>Refuel history</div>
-              {!vehicleRefuels.length && <div style={{ color: COLORS.textSecondary }}>No entries yet.</div>}
+              <SectionTitle icon="📋">Refuel history</SectionTitle>
+              {!vehicleRefuels.length && <EmptyState icon="⛽" message="No refuel entries yet. Add your first fill-up above!" />}
               <div style={{ display: 'grid', gap: 8 }}>
                 {vehicleRefuels
                   .slice()
@@ -806,22 +1140,34 @@ export default function App() {
                       style={{
                         border: `1px solid ${COLORS.borderLight}`,
                         borderRadius: 12,
-                        padding: 10,
+                        padding: '10px 12px',
                         background: COLORS.surfaceElevated,
+                        transition: 'border-color 0.2s',
                       }}
                     >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                        <strong>{formatDate(entry.date)}</strong>
-                        <span style={{ color: COLORS.textSecondary }}>{entry.odometer} km</span>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <strong>{formatDate(entry.date)}</strong>
+                          {entry.isFullTank ? (
+                            <span style={{ fontSize: 10, color: COLORS.success, background: `${COLORS.success}22`, padding: '1px 6px', borderRadius: 6, fontWeight: 600 }}>FULL</span>
+                          ) : (
+                            <span style={{ fontSize: 10, color: COLORS.warning, background: `${COLORS.warning}22`, padding: '1px 6px', borderRadius: 6, fontWeight: 600 }}>PARTIAL</span>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                          <IconButton onClick={() => openEditRefuel(entry)} title="Edit">✏️</IconButton>
+                          <IconButton onClick={() => setDeleteRefuelId(entry.id)} title="Delete" variant="danger">🗑️</IconButton>
+                        </div>
                       </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.textSecondary }}>
-                        <span>
-                          {fmt(entry.liters, 2)} L · {fmt(entry.pricePerLiter, 2)} {currency}/L
-                        </span>
-                        <span>
-                          {fmt(entry.totalCost, 2)} {currency}
-                        </span>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.textSecondary, fontSize: 13 }}>
+                        <span>{fmt(entry.liters, 2)} L · {fmt(entry.pricePerLiter, 2)} {currency}/L</span>
+                        <span style={{ fontWeight: 600, color: COLORS.textPrimary }}>{fmt(entry.totalCost, 2)} {currency}</span>
                       </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.textMuted, fontSize: 12, marginTop: 4 }}>
+                        <span>{entry.odometer.toLocaleString()} km</span>
+                        {entry.station && <span>📍 {entry.station}</span>}
+                      </div>
+                      {entry.note && <div style={{ color: COLORS.textMuted, fontSize: 12, marginTop: 3, fontStyle: 'italic' }}>💬 {entry.note}</div>}
                     </div>
                   ))}
               </div>
@@ -829,14 +1175,23 @@ export default function App() {
           </div>
         )}
 
+        {/* ═══ STATS TAB ═══ */}
         {selectedVehicle && activeTab === 'stats' && (
-          <div style={{ display: 'grid', gap: 12 }}>
+          <div style={{ display: 'grid', gap: 14 }}>
+            {/* Summary row */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+              <StatBox label="Refuels" value={stats.refuelCount} icon="⛽" accent={COLORS.accent} />
+              <StatBox label="Total Cost" value={`${fmt(stats.totalCost, 0)} ${currency}`} icon="💰" accent={COLORS.warning} />
+              <StatBox label="Distance" value={`${fmt(stats.totalDistance, 0)} km`} icon="🛣️" accent={COLORS.success} />
+            </div>
+
             <ChartCard
               title="Consumption trend (l/100 km)"
               labels={stats.consumptionSeries.map((x) => x.date.slice(5))}
               values={stats.consumptionSeries.map((x) => Number(fmt(x.value, 2)))}
               type="line"
               color={COLORS.accent}
+              unit="l/100km"
             />
             <ChartCard
               title="Monthly fuel cost"
@@ -844,6 +1199,7 @@ export default function App() {
               values={stats.monthlyCost.map((x) => Number(fmt(x.value, 2)))}
               type="bar"
               color={COLORS.warning}
+              unit={currency}
             />
             <ChartCard
               title="Fuel price history"
@@ -851,6 +1207,7 @@ export default function App() {
               values={stats.priceSeries.map((x) => Number(fmt(x.value, 2)))}
               type="line"
               color={COLORS.success}
+              unit={`${currency}/L`}
             />
             <ChartCard
               title="Distance per month"
@@ -858,32 +1215,49 @@ export default function App() {
               values={stats.monthlyDistance.map((x) => Number(fmt(x.value, 0)))}
               type="bar"
               color={COLORS.accent}
+              unit="km"
             />
           </div>
         )}
 
+        {/* ═══ MAINTENANCE TAB ═══ */}
         {selectedVehicle && activeTab === 'maintenance' && (
-          <div style={{ display: 'grid', gap: 12 }}>
+          <div style={{ display: 'grid', gap: 14 }}>
             <Card>
-              <div style={{ fontWeight: 700, marginBottom: 10 }}>Maintenance reminders</div>
-              {!vehicleMaintenance.length && <div style={{ color: COLORS.textSecondary }}>No reminders yet.</div>}
+              <SectionTitle icon="🔔">Maintenance reminders</SectionTitle>
+              {!vehicleMaintenance.length && <EmptyState icon="🔧" message="No maintenance reminders yet. Add one below!" />}
               <div style={{ display: 'grid', gap: 8 }}>
                 {vehicleMaintenance.map((item) => {
                   const status = getMaintenanceStatus(item, currentOdometer);
                   const dueAtKm = item.intervalKm > 0 ? item.lastDoneOdometer + item.intervalKm : null;
                   return (
-                    <div key={item.id} style={{ background: COLORS.surfaceElevated, borderRadius: 12, padding: 10, border: `1px solid ${COLORS.borderLight}` }}>
+                    <div key={item.id} style={{ background: COLORS.surfaceElevated, borderRadius: 12, padding: 12, border: `1px solid ${status.key === 'due' ? `${COLORS.danger}44` : COLORS.borderLight}` }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, alignItems: 'center' }}>
-                        <strong>{item.label}</strong>
-                        <StatusPill color={status.color} label={status.label} />
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <strong>{item.label}</strong>
+                          <StatusPill color={status.color} label={status.label} />
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                          <IconButton onClick={() => openEditMaint(item)} title="Edit">✏️</IconButton>
+                          <IconButton onClick={() => setDeleteMaintId(item.id)} title="Delete" variant="danger">🗑️</IconButton>
+                        </div>
                       </div>
-                      <div style={{ color: COLORS.textSecondary, fontSize: 14 }}>
-                        Last: {formatDate(item.lastDoneAt)} · {item.lastDoneOdometer} km
+                      <div style={{ color: COLORS.textSecondary, fontSize: 13, lineHeight: 1.6 }}>
+                        <div>Last: {formatDate(item.lastDoneAt)} · {item.lastDoneOdometer.toLocaleString()} km</div>
+                        <div>Due: {item.intervalDays ? `${item.intervalDays} days` : '-'} · {dueAtKm ? `${dueAtKm.toLocaleString()} km` : '-'}</div>
+                        {item.cost > 0 && <div>Cost: {fmt(item.cost)} {currency}</div>}
                       </div>
-                      <div style={{ color: COLORS.textSecondary, fontSize: 14 }}>
-                        Due: {item.intervalDays ? `${item.intervalDays} days` : '-'} · {dueAtKm ? `${dueAtKm} km` : '-'}
-                      </div>
-                      {item.note && <div style={{ color: COLORS.textSecondary, marginTop: 4 }}>{item.note}</div>}
+                      {item.note && <div style={{ color: COLORS.textMuted, marginTop: 4, fontSize: 12, fontStyle: 'italic' }}>💬 {item.note}</div>}
+                      {status.key === 'due' && (
+                        <Button
+                          variant="success"
+                          size="small"
+                          style={{ marginTop: 8, width: '100%' }}
+                          onClick={() => markMaintenanceDone(item)}
+                        >
+                          ✓ Mark as done today
+                        </Button>
+                      )}
                     </div>
                   );
                 })}
@@ -891,7 +1265,7 @@ export default function App() {
             </Card>
 
             <Card>
-              <div style={{ fontWeight: 700, marginBottom: 10 }}>Add maintenance</div>
+              <SectionTitle icon="➕">Add maintenance</SectionTitle>
               <form onSubmit={addMaintenance} style={{ display: 'grid', gap: 10 }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                   <div>
@@ -941,16 +1315,17 @@ export default function App() {
                   <Label>Note</Label>
                   <Input value={maintForm.note} onChange={(e) => setMaintForm((prev) => ({ ...prev, note: e.target.value }))} />
                 </div>
-                <Button type="submit">Save reminder</Button>
+                <Button type="submit" style={{ width: '100%', marginTop: 2 }}>Save reminder</Button>
               </form>
             </Card>
           </div>
         )}
 
+        {/* ═══ SETTINGS TAB ═══ */}
         {selectedVehicle && activeTab === 'settings' && (
-          <div style={{ display: 'grid', gap: 12 }}>
+          <div style={{ display: 'grid', gap: 14 }}>
             <Card>
-              <div style={{ fontWeight: 700, marginBottom: 10 }}>Add vehicle</div>
+              <SectionTitle icon="🚗">Add vehicle</SectionTitle>
               <form onSubmit={addVehicle} style={{ display: 'grid', gap: 10 }}>
                 <div>
                   <Label>Name</Label>
@@ -989,13 +1364,16 @@ export default function App() {
                     </Select>
                   </div>
                 </div>
-                <Button type="submit">Add vehicle</Button>
+                <Button type="submit" style={{ width: '100%', marginTop: 2 }}>Add vehicle</Button>
               </form>
             </Card>
 
             <Card>
-              <div style={{ fontWeight: 700, marginBottom: 10 }}>Current vehicle settings</div>
-              <div style={{ marginBottom: 8, color: COLORS.textSecondary }}>{selectedVehicle.name}</div>
+              <SectionTitle icon="⚙">Current vehicle settings</SectionTitle>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <span style={{ color: COLORS.textSecondary }}>{selectedVehicle.name}</span>
+                <FuelBadge fuelType={selectedVehicle.fuelType} />
+              </div>
               <Label>Currency</Label>
               <Select value={currency} onChange={(e) => updateVehicleCurrency(e.target.value)}>
                 {CURRENCIES.map((cur) => (
@@ -1004,39 +1382,76 @@ export default function App() {
               </Select>
             </Card>
 
+            {/* Manage vehicles */}
+            {vehicles.length > 1 && (
+              <Card>
+                <SectionTitle icon="🗂️">Manage vehicles</SectionTitle>
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {vehicles.map((v) => (
+                    <div
+                      key={v.id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        background: COLORS.surfaceElevated,
+                        borderRadius: 10,
+                        padding: '8px 12px',
+                        border: `1px solid ${v.id === selectedVehicleId ? COLORS.accent + '44' : COLORS.borderLight}`,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontWeight: 600 }}>{v.name}</span>
+                        {v.year > 0 && <span style={{ color: COLORS.textMuted, fontSize: 12 }}>({v.year})</span>}
+                        <FuelBadge fuelType={v.fuelType} />
+                      </div>
+                      <IconButton
+                        onClick={() => setDeleteVehicleId(v.id)}
+                        title="Delete vehicle"
+                        variant="danger"
+                      >
+                        🗑️
+                      </IconButton>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            )}
+
             <Card>
-              <div style={{ fontWeight: 700, marginBottom: 10 }}>Export / Import JSON</div>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-                <Button type="button" onClick={exportData}>Export data</Button>
-                <Button type="button" variant="secondary" onClick={() => {
-                  setVehicles([]);
-                  setRefuels([]);
-                  setMaintenance([]);
-                  setSelectedVehicleId('');
-                }}>
-                  Clear all
+              <SectionTitle icon="💾">Export / Import JSON</SectionTitle>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                <Button type="button" onClick={exportData} style={{ flex: 1 }}>📤 Export data</Button>
+                <Button
+                  type="button"
+                  variant="danger"
+                  onClick={() => setConfirmClearAll(true)}
+                  style={{ flex: 1 }}
+                >
+                  🗑️ Clear all
                 </Button>
               </div>
+              <Label>Import backup</Label>
               <Input
                 type="file"
                 accept="application/json"
                 onChange={(e) => importData(e.target.files?.[0])}
               />
-              {importError && <div style={{ color: COLORS.danger, marginTop: 6 }}>{importError}</div>}
+              {importError && <div style={{ color: COLORS.danger, marginTop: 6, fontSize: 13 }}>{importError}</div>}
             </Card>
 
             <Card>
-              <div style={{ fontWeight: 700, marginBottom: 10 }}>Price → cost/km reference</div>
-              <div style={{ color: COLORS.textSecondary, marginBottom: 8 }}>
-                Based on avg consumption {fmt(stats.avgConsumption)} l/100 km
+              <SectionTitle icon="📊">Price → cost/km reference</SectionTitle>
+              <div style={{ color: COLORS.textSecondary, marginBottom: 10, fontSize: 13 }}>
+                Based on avg consumption <strong style={{ color: COLORS.textPrimary }}>{fmt(stats.avgConsumption)} l/100 km</strong>
               </div>
               <div style={{ display: 'grid', gap: 6 }}>
                 {quickTablePrices.map((price) => {
                   const costPerKm = (stats.avgConsumption * price) / 100;
                   return (
-                    <div key={price} style={{ display: 'flex', justifyContent: 'space-between', background: COLORS.surfaceElevated, padding: '8px 10px', borderRadius: 10 }}>
+                    <div key={price} style={{ display: 'flex', justifyContent: 'space-between', background: COLORS.surfaceElevated, padding: '8px 12px', borderRadius: 10, fontSize: 13 }}>
                       <span>{price} {currency}/L</span>
-                      <strong>{fmt(costPerKm)} {currency}/km</strong>
+                      <strong style={{ color: COLORS.accent }}>{fmt(costPerKm)} {currency}/km</strong>
                     </div>
                   );
                 })}
@@ -1046,43 +1461,229 @@ export default function App() {
         )}
       </div>
 
+      {/* ═══ Bottom tab bar ═══ */}
       <div
         style={{
           position: 'fixed',
           bottom: 0,
           left: 0,
           right: 0,
-          background: `${COLORS.surface}ee`,
+          background: `${COLORS.surface}f0`,
           borderTop: `1px solid ${COLORS.border}`,
-          padding: `8px 10px calc(8px + env(safe-area-inset-bottom))`,
-          backdropFilter: 'blur(10px)',
+          padding: `6px 10px calc(6px + env(safe-area-inset-bottom))`,
+          backdropFilter: 'blur(16px)',
+          WebkitBackdropFilter: 'blur(16px)',
         }}
       >
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, maxWidth: 720, margin: '0 auto' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4, maxWidth: 720, margin: '0 auto' }}>
           {TAB_ITEMS.map((tab) => {
             const isActive = activeTab === tab.key;
+            const showBadge = tab.key === 'maintenance' && overdueCount > 0;
             return (
               <button
                 key={tab.key}
                 type="button"
                 onClick={() => setActiveTab(tab.key)}
                 style={{
-                  border: `1px solid ${isActive ? COLORS.accent : 'transparent'}`,
-                  background: isActive ? `${COLORS.accent}1f` : 'transparent',
-                  color: isActive ? COLORS.accent : COLORS.textSecondary,
-                  borderRadius: 10,
-                  padding: '10px 6px',
-                  fontWeight: 700,
-                  fontSize: 13,
+                  position: 'relative',
+                  border: 'none',
+                  background: isActive ? `${COLORS.accent}1a` : 'transparent',
+                  color: isActive ? COLORS.accent : COLORS.textMuted,
+                  borderRadius: 12,
+                  padding: '8px 4px 6px',
+                  fontWeight: 600,
+                  fontSize: 11,
                   cursor: 'pointer',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  gap: 2,
+                  transition: 'color 0.2s, background 0.2s',
                 }}
               >
-                {tab.label}
+                <span style={{ fontSize: 20 }}>{tab.icon}</span>
+                <span>{tab.label}</span>
+                {showBadge && (
+                  <span
+                    style={{
+                      position: 'absolute',
+                      top: 4,
+                      right: '50%',
+                      transform: 'translateX(14px)',
+                      background: COLORS.danger,
+                      color: '#fff',
+                      borderRadius: 999,
+                      minWidth: 16,
+                      height: 16,
+                      fontSize: 9,
+                      fontWeight: 800,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      padding: '0 4px',
+                    }}
+                  >
+                    {overdueCount}
+                  </span>
+                )}
               </button>
             );
           })}
         </div>
       </div>
+
+      {/* ═══ Modals ═══ */}
+
+      {/* Edit Refuel Modal */}
+      <Modal open={Boolean(editRefuelId)} title="Edit Refuel" onClose={() => { setEditRefuelId(null); setEditRefuelForm(null); }}>
+        {editRefuelForm && (
+          <div style={{ display: 'grid', gap: 10 }}>
+            <div>
+              <Label>Date</Label>
+              <Input type="date" value={editRefuelForm.date} onChange={(e) => setEditRefuelForm((prev) => ({ ...prev, date: e.target.value }))} />
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <div>
+                <Label>Odometer (km)</Label>
+                <Input type="number" value={editRefuelForm.odometer} onChange={(e) => setEditRefuelForm((prev) => ({ ...prev, odometer: e.target.value }))} />
+              </div>
+              <div>
+                <Label>Liters</Label>
+                <Input type="number" step="0.01" value={editRefuelForm.liters} onChange={(e) => setEditRefuelForm((prev) => ({ ...prev, liters: e.target.value }))} />
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <div>
+                <Label>Price/L ({currency})</Label>
+                <Input type="number" step="0.01" value={editRefuelForm.pricePerLiter} onChange={(e) => setEditRefuelForm((prev) => ({ ...prev, pricePerLiter: e.target.value }))} />
+              </div>
+              <div>
+                <Label>Tank Type</Label>
+                <Select value={String(editRefuelForm.isFullTank)} onChange={(e) => setEditRefuelForm((prev) => ({ ...prev, isFullTank: e.target.value === 'true' }))}>
+                  <option value="true">Full tank</option>
+                  <option value="false">Partial</option>
+                </Select>
+              </div>
+            </div>
+            <div>
+              <Label>Station</Label>
+              <Input value={editRefuelForm.station} onChange={(e) => setEditRefuelForm((prev) => ({ ...prev, station: e.target.value }))} />
+            </div>
+            <div>
+              <Label>Note</Label>
+              <Input value={editRefuelForm.note} onChange={(e) => setEditRefuelForm((prev) => ({ ...prev, note: e.target.value }))} />
+            </div>
+            <Button onClick={saveEditRefuel} style={{ width: '100%', marginTop: 4 }}>Save changes</Button>
+          </div>
+        )}
+      </Modal>
+
+      {/* Delete Refuel Confirm */}
+      <ConfirmDialog
+        open={Boolean(deleteRefuelId)}
+        title="Delete Refuel"
+        message="Are you sure you want to delete this refuel entry? This action cannot be undone."
+        confirmLabel="Delete"
+        confirmVariant="danger"
+        onConfirm={confirmDeleteRefuel}
+        onCancel={() => setDeleteRefuelId(null)}
+      />
+
+      {/* Edit Maintenance Modal */}
+      <Modal open={Boolean(editMaintId)} title="Edit Maintenance" onClose={() => { setEditMaintId(null); setEditMaintForm(null); }}>
+        {editMaintForm && (
+          <div style={{ display: 'grid', gap: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <div>
+                <Label>Type</Label>
+                <Select
+                  value={editMaintForm.type}
+                  onChange={(e) => {
+                    const option = MAINT_TYPES.find((x) => x.value === e.target.value);
+                    setEditMaintForm((prev) => ({ ...prev, type: e.target.value, label: option?.label || prev.label }));
+                  }}
+                >
+                  {MAINT_TYPES.map((type) => (
+                    <option key={type.value} value={type.value}>{type.label}</option>
+                  ))}
+                </Select>
+              </div>
+              <div>
+                <Label>Label</Label>
+                <Input value={editMaintForm.label} onChange={(e) => setEditMaintForm((prev) => ({ ...prev, label: e.target.value }))} />
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <div>
+                <Label>Last done date</Label>
+                <Input type="date" value={editMaintForm.lastDoneAt} onChange={(e) => setEditMaintForm((prev) => ({ ...prev, lastDoneAt: e.target.value }))} />
+              </div>
+              <div>
+                <Label>Last done odometer</Label>
+                <Input type="number" value={editMaintForm.lastDoneOdometer} onChange={(e) => setEditMaintForm((prev) => ({ ...prev, lastDoneOdometer: e.target.value }))} />
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+              <div>
+                <Label>Interval km</Label>
+                <Input type="number" value={editMaintForm.intervalKm} onChange={(e) => setEditMaintForm((prev) => ({ ...prev, intervalKm: e.target.value }))} />
+              </div>
+              <div>
+                <Label>Interval days</Label>
+                <Input type="number" value={editMaintForm.intervalDays} onChange={(e) => setEditMaintForm((prev) => ({ ...prev, intervalDays: e.target.value }))} />
+              </div>
+              <div>
+                <Label>Cost ({currency})</Label>
+                <Input type="number" value={editMaintForm.cost} onChange={(e) => setEditMaintForm((prev) => ({ ...prev, cost: e.target.value }))} />
+              </div>
+            </div>
+            <div>
+              <Label>Note</Label>
+              <Input value={editMaintForm.note} onChange={(e) => setEditMaintForm((prev) => ({ ...prev, note: e.target.value }))} />
+            </div>
+            <Button onClick={saveEditMaint} style={{ width: '100%', marginTop: 4 }}>Save changes</Button>
+          </div>
+        )}
+      </Modal>
+
+      {/* Delete Maintenance Confirm */}
+      <ConfirmDialog
+        open={Boolean(deleteMaintId)}
+        title="Delete Maintenance"
+        message="Are you sure you want to delete this maintenance reminder? This action cannot be undone."
+        confirmLabel="Delete"
+        confirmVariant="danger"
+        onConfirm={confirmDeleteMaint}
+        onCancel={() => setDeleteMaintId(null)}
+      />
+
+      {/* Delete Vehicle Confirm */}
+      <ConfirmDialog
+        open={Boolean(deleteVehicleId)}
+        title="Delete Vehicle"
+        message="This will permanently delete the vehicle and ALL associated refuel entries and maintenance reminders. Are you sure?"
+        confirmLabel="Delete vehicle"
+        confirmVariant="danger"
+        onConfirm={() => deleteVehicle(deleteVehicleId)}
+        onCancel={() => setDeleteVehicleId(null)}
+      />
+
+      {/* Clear All Confirm */}
+      <ConfirmDialog
+        open={confirmClearAll}
+        title="Clear All Data"
+        message="This will permanently delete ALL vehicles, refuels, and maintenance data. This action cannot be undone."
+        confirmLabel="Clear everything"
+        confirmVariant="danger"
+        onConfirm={() => {
+          setVehicles([]);
+          setRefuels([]);
+          setMaintenance([]);
+          setSelectedVehicleId('');
+          setConfirmClearAll(false);
+        }}
+        onCancel={() => setConfirmClearAll(false)}
+      />
     </div>
   );
 }
