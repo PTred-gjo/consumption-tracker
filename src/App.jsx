@@ -282,10 +282,27 @@ function Label({ children }) {
   );
 }
 
+const inputClassName = 'fp-input';
+const buttonClassName = 'fp-button';
+
+function ensureGlobalStyles() {
+  if (typeof document === 'undefined') return;
+  if (document.getElementById('fp-global-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'fp-global-styles';
+  style.textContent = `
+    .${inputClassName}:focus { border-color: ${COLORS.accent} !important; }
+    .${buttonClassName}:active { transform: scale(0.97); }
+  `;
+  document.head.appendChild(style);
+}
+
 function Input({ style: extraStyle, ...props }) {
+  ensureGlobalStyles();
   return (
     <input
       {...props}
+      className={inputClassName}
       style={{
         width: '100%',
         boxSizing: 'border-box',
@@ -299,8 +316,6 @@ function Input({ style: extraStyle, ...props }) {
         transition: 'border-color 0.2s',
         ...extraStyle,
       }}
-      onFocus={(e) => { e.target.style.borderColor = COLORS.accent; props.onFocus?.(e); }}
-      onBlur={(e) => { e.target.style.borderColor = COLORS.border; props.onBlur?.(e); }}
     />
   );
 }
@@ -328,6 +343,7 @@ function Select({ children, ...props }) {
 }
 
 function Button({ children, variant = 'primary', size = 'normal', style, ...props }) {
+  ensureGlobalStyles();
   const palettes = {
     primary: { background: COLORS.accent, color: '#fff', border: COLORS.accent },
     secondary: { background: COLORS.surfaceElevated, color: COLORS.textPrimary, border: COLORS.border },
@@ -341,6 +357,7 @@ function Button({ children, variant = 'primary', size = 'normal', style, ...prop
   return (
     <button
       {...props}
+      className={buttonClassName}
       style={{
         border: `1px solid ${palette.border}`,
         background: palette.background,
@@ -352,9 +369,6 @@ function Button({ children, variant = 'primary', size = 'normal', style, ...prop
         ...sizeStyles,
         ...style,
       }}
-      onMouseDown={(e) => { e.currentTarget.style.transform = 'scale(0.97)'; }}
-      onMouseUp={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
-      onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
     >
       {children}
     </button>
@@ -694,7 +708,7 @@ export default function App() {
     setMaintenance((prev) => prev.filter((m) => m.vehicleId !== id));
     setSelectedVehicleId((prevId) => (prevId === id ? '' : prevId));
     setDeleteVehicleId(null);
-  }, [setVehicles, setRefuels, setMaintenance, setSelectedVehicleId]);
+  }, []);
 
   function addRefuel(e) {
     e.preventDefault();
@@ -935,7 +949,7 @@ export default function App() {
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
           <span style={{ fontSize: 32 }}>⛽</span>
-          <div style={{ fontSize: 28, fontWeight: 800, background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentLight})`, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>FuelPilot</div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: COLORS.accent, background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentLight})`, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>FuelPilot</div>
         </div>
         <div style={{ color: COLORS.textSecondary, marginBottom: 18, fontSize: 13, paddingLeft: 2 }}>
           Smart fuel tracker · real costs per kilometer
