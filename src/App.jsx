@@ -147,6 +147,7 @@ function computeStats(refuels) {
     return {
       consumptionSeries: [],
       avgConsumption: 0,
+      isEstimatedConsumption: false,
       monthlyCost: [],
       priceSeries: [],
       monthlyDistance: [],
@@ -168,6 +169,7 @@ function computeStats(refuels) {
 
   // Distance-weighted average consumption: total fuel consumed / total distance × 100
   let avgConsumption = 0;
+  let isEstimatedConsumption = false;
   if (consumptionSeries.length) {
     const totalSeriesFuel = consumptionSeries.reduce((sum, p) => sum + p.liters, 0);
     const totalSeriesDist = consumptionSeries.reduce((sum, p) => sum + p.distance, 0);
@@ -181,6 +183,16 @@ function computeStats(refuels) {
   const totalCost = refuels.reduce((sum, entry) => sum + entry.totalCost, 0);
   const totalLiters = refuels.reduce((sum, entry) => sum + entry.liters, 0);
   const totalDistance = Math.max(0, lastEntry.odometer - firstEntry.odometer);
+
+  // Fallback: estimate consumption from tracked fuel / total distance when no full-tank series data.
+  // Mirrors the avgCostPerKm logic: exclude the first refuel (it fills the baseline tank).
+  if (avgConsumption === 0 && refuels.length > 1 && totalDistance > 0) {
+    const trackedFuel = totalLiters - firstEntry.liters;
+    if (trackedFuel > 0) {
+      avgConsumption = (trackedFuel / totalDistance) * 100;
+      isEstimatedConsumption = true;
+    }
+  }
 
   // Exclude the first refuel's cost: it establishes the odometer baseline and the
   // fuel in it was consumed *before* the tracked distance begins.
@@ -224,6 +236,7 @@ function computeStats(refuels) {
   return {
     consumptionSeries,
     avgConsumption,
+    isEstimatedConsumption,
     lastConsumption,
     monthlyCost,
     priceSeries,
@@ -1604,7 +1617,17 @@ export default function App() {
   }
 
   const currency = selectedVehicle?.currency || 'Kč';
-  const quickTablePrices = [25, 30, 35, 40, 45, 50, 55, 60];
+  // Generate a price table dynamically around the user's last recorded fuel price.
+  // The step size scales with the price magnitude so it looks natural for any currency.
+  const lastKnownPrice = stats.priceSeries.length > 0
+    ? stats.priceSeries[stats.priceSeries.length - 1].value
+    : 0;
+  const tablePriceBase = lastKnownPrice > 0 ? lastKnownPrice : (currency === '€' ? 1.6 : currency === '$' ? 3.5 : currency === '£' ? 1.5 : 36);
+  const rawStep = tablePriceBase * 0.05;
+  const tableStep = rawStep >= 1 ? Math.round(rawStep) : Math.round(rawStep * 10) / 10;
+  const quickTablePrices = Array.from({ length: 8 }, (_, i) =>
+    Math.round((tablePriceBase - 2 * tableStep + i * tableStep) * 100) / 100
+  ).filter((p) => p > 0);
   const TAB_ORDER = { refuel: 0, stats: 1, maintenance: 2, settings: 3 };
 
   function handleTabChange(newTab) {
@@ -1830,7 +1853,7 @@ export default function App() {
                 <StatBox label="Last Fill" value={stats.lastEntry ? `${fmt(stats.lastEntry.liters, 1)} L` : '-'} accent={COLORS.accent} />
                 <StatBox
                   label="Avg Consumption"
-                  value={`${fmt(stats.avgConsumption)} l/100`}
+                  value={stats.avgConsumption > 0 ? `${fmt(stats.avgConsumption)} l/100${stats.isEstimatedConsumption ? ' (est.)' : ''}` : '-'}
                   accent={COLORS.warning}
                   trend={
                     stats.avgConsumption > 0 && stats.lastConsumption > 0 && stats.consumptionSeries.length > 1
@@ -2626,19 +2649,29 @@ export default function App() {
             <Card>
               <SectionTitle icon="📊">Price → cost/km reference</SectionTitle>
               <div style={{ color: COLORS.textSecondary, marginBottom: 10, fontSize: 13 }}>
-                Based on avg consumption <strong style={{ color: COLORS.textPrimary }}>{fmt(stats.avgConsumption)} l/100 km</strong>
+                Based on avg consumption{' '}
+                <strong style={{ color: COLORS.textPrimary }}>{fmt(stats.avgConsumption)} l/100 km</strong>
+                {stats.isEstimatedConsumption && (
+                  <span style={{ color: COLORS.textMuted, fontSize: 11, marginLeft: 4 }}>(est.)</span>
+                )}
               </div>
-              <div style={{ display: 'grid', gap: 6 }}>
-                {quickTablePrices.map((price) => {
-                  const costPerKm = (stats.avgConsumption * price) / 100;
-                  return (
-                    <div key={price} style={{ display: 'flex', justifyContent: 'space-between', background: COLORS.surfaceElevated, padding: '8px 12px', borderRadius: 10, fontSize: 13 }}>
-                      <span>{price} {currency}/L</span>
-                      <strong style={{ color: COLORS.accent }}>{fmt(costPerKm)} {currency}/km</strong>
-                    </div>
-                  );
-                })}
-              </div>
+              {stats.avgConsumption === 0 ? (
+                <div style={{ color: COLORS.textMuted, fontSize: 13, textAlign: 'center', padding: '12px 0' }}>
+                  Add at least 2 refuels to calculate cost/km
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gap: 6 }}>
+                  {quickTablePrices.map((price) => {
+                    const costPerKm = (stats.avgConsumption * price) / 100;
+                    return (
+                      <div key={price} style={{ display: 'flex', justifyContent: 'space-between', background: COLORS.surfaceElevated, padding: '8px 12px', borderRadius: 10, fontSize: 13 }}>
+                        <span>{price} {currency}/L</span>
+                        <strong style={{ color: COLORS.accent }}>{fmt(costPerKm)} {currency}/km</strong>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </Card>
           </div>
         )}
