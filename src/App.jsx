@@ -583,34 +583,57 @@ function ConfirmDialog({ open, title, message, confirmLabel, confirmVariant, onC
   );
 }
 
-function ChartCard({ title, labels, values, type = 'line', color = COLORS.accent, unit }) {
+function ChartCard({ title, labels, values, type = 'line', color = COLORS.accent, unit, goalLine, pointColors }) {
   const ref = useRef(null);
 
   useEffect(() => {
     if (!ref.current) return undefined;
 
+    const mainDataset = {
+      label: title,
+      data: values,
+      borderColor: color,
+      backgroundColor: type === 'bar' ? `${color}88` : `${color}33`,
+      tension: 0.35,
+      fill: type === 'line',
+      borderWidth: 2,
+      borderRadius: type === 'bar' ? 6 : 0,
+      ...(pointColors ? {
+        pointBackgroundColor: pointColors.map((c) => c ?? color),
+        pointBorderColor: pointColors.map((c) => c ?? color),
+        pointRadius: pointColors.map((c) => (c !== null ? 7 : 3)),
+        pointHoverRadius: 9,
+      } : {}),
+    };
+
+    const datasets = [mainDataset];
+
+    if (goalLine && goalLine.value > 0) {
+      datasets.push({
+        label: goalLine.label || 'Target',
+        data: values.map(() => goalLine.value),
+        borderColor: goalLine.color || COLORS.warning,
+        backgroundColor: 'transparent',
+        borderWidth: 2,
+        borderDash: [6, 3],
+        tension: 0,
+        fill: false,
+        pointRadius: 0,
+        pointHoverRadius: 0,
+      });
+    }
+
     const chart = new Chart(ref.current, {
       type,
-      data: {
-        labels,
-        datasets: [
-          {
-            label: title,
-            data: values,
-            borderColor: color,
-            backgroundColor: type === 'bar' ? `${color}88` : `${color}33`,
-            tension: 0.35,
-            fill: type === 'line',
-            borderWidth: 2,
-            borderRadius: type === 'bar' ? 6 : 0,
-          },
-        ],
-      },
+      data: { labels, datasets },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-          legend: { display: false },
+          legend: goalLine ? {
+            display: true,
+            labels: { color: COLORS.textSecondary, font: { size: 11 }, boxWidth: 24, padding: 10 },
+          } : { display: false },
           tooltip: {
             backgroundColor: COLORS.surface,
             titleColor: COLORS.textPrimary,
@@ -636,7 +659,7 @@ function ChartCard({ title, labels, values, type = 'line', color = COLORS.accent
     });
 
     return () => chart.destroy();
-  }, [title, labels, values, type, color, unit]);
+  }, [title, labels, values, type, color, unit, goalLine, pointColors]);
 
   return (
     <Card>
@@ -936,6 +959,10 @@ export default function App() {
   const [tabAnimDir, setTabAnimDir] = useState('right');
   const [theme, setTheme] = usePersistentState('fuelpilot_theme', 'dark');
   const [isHydrated, setIsHydrated] = useState(false);
+  const [consumptionTarget, setConsumptionTarget] = usePersistentState('fuelpilot_consumptionTarget', 0);
+  const [consumptionTargetInput, setConsumptionTargetInput] = useState('');
+  const [rangeFrom, setRangeFrom] = useState('');
+  const [rangeTo, setRangeTo] = useState('');
   const [vehicles, setVehicles] = usePersistentState('fuelpilot_vehicles', []);
   const [refuels, setRefuels] = usePersistentState('fuelpilot_refuels', []);
   const [maintenance, setMaintenance] = usePersistentState('fuelpilot_maintenance', []);
@@ -978,6 +1005,18 @@ export default function App() {
 
   const stats = useMemo(() => computeStats(vehicleRefuels), [vehicleRefuels]);
   const currentOdometer = getCurrentOdometer(vehicleRefuels);
+
+  // Date-filtered slice used exclusively on the Stats tab
+  const filteredRefuels = useMemo(() => {
+    if (!rangeFrom && !rangeTo) return vehicleRefuels;
+    return vehicleRefuels.filter((r) => {
+      if (rangeFrom && r.date < rangeFrom) return false;
+      if (rangeTo && r.date > rangeTo) return false;
+      return true;
+    });
+  }, [vehicleRefuels, rangeFrom, rangeTo]);
+
+  const filteredStats = useMemo(() => computeStats(filteredRefuels), [filteredRefuels]);
 
   const vehicleMaintenance = useMemo(
     () => (selectedVehicle ? maintenance.filter((x) => x.vehicleId === selectedVehicle.id) : []),
@@ -1618,45 +1657,165 @@ export default function App() {
         {/* ═══ STATS TAB ═══ */}
         {selectedVehicle && activeTab === 'stats' && (
           <div className={`fp-tab-enter-${tabAnimDir}`} style={{ display: 'grid', gap: 14 }}>
-            {/* Summary row */}
+
+            {/* ── Date range filter ── */}
+            <Card style={{ padding: '12px 14px' }}>
+              <SectionTitle icon="📅">Date range filter</SectionTitle>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+                <div>
+                  <Label>From</Label>
+                  <Input type="date" value={rangeFrom} onChange={(e) => setRangeFrom(e.target.value)} />
+                </div>
+                <div>
+                  <Label>To</Label>
+                  <Input type="date" value={rangeTo} onChange={(e) => setRangeTo(e.target.value)} />
+                </div>
+              </div>
+              {(rangeFrom || rangeTo) && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: 12, color: COLORS.textSecondary }}>
+                    Showing {filteredRefuels.length} of {vehicleRefuels.length} refuels
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="small"
+                    onClick={() => { setRangeFrom(''); setRangeTo(''); }}
+                  >
+                    ✕ Clear filter
+                  </Button>
+                </div>
+              )}
+            </Card>
+
+            {/* ── Summary row ── */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
-              <StatBox label="Refuels" value={stats.refuelCount} icon="⛽" accent={COLORS.accent} />
-              <StatBox label="Total Cost" value={`${fmt(stats.totalCost, 0)} ${currency}`} icon="💰" accent={COLORS.warning} />
-              <StatBox label="Distance" value={`${fmt(stats.totalDistance, 0)} km`} icon="🛣️" accent={COLORS.success} />
+              <StatBox label="Refuels" value={filteredStats.refuelCount} icon="⛽" accent={COLORS.accent} />
+              <StatBox label="Total Cost" value={`${fmt(filteredStats.totalCost, 0)} ${currency}`} icon="💰" accent={COLORS.warning} />
+              <StatBox label="Distance" value={`${fmt(filteredStats.totalDistance, 0)} km`} icon="🛣️" accent={COLORS.success} />
             </div>
 
+            {/* ── Last fill vs average (feature 6) ── */}
+            {filteredStats.consumptionSeries.length >= 2 && (() => {
+              const last = filteredStats.lastConsumption;
+              const avg = filteredStats.avgConsumption;
+              const diffPct = avg > 0 ? ((last - avg) / avg) * 100 : 0;
+              const better = last <= avg;
+              const arrow = better ? '▼' : '▲';
+              const trendColor = better ? COLORS.success : COLORS.danger;
+              const lastPrice = filteredStats.priceSeries.length
+                ? filteredStats.priceSeries[filteredStats.priceSeries.length - 1].value
+                : 0;
+              const avgPrice = filteredStats.priceSeries.length
+                ? filteredStats.priceSeries.reduce((s, x) => s + x.value, 0) / filteredStats.priceSeries.length
+                : 0;
+              const priceDiff = avgPrice > 0 ? ((lastPrice - avgPrice) / avgPrice) * 100 : 0;
+              const priceBetter = lastPrice <= avgPrice;
+              return (
+                <Card style={{ background: `${trendColor}0d`, border: `1px solid ${trendColor}33` }}>
+                  <SectionTitle icon="📊">Last fill vs average</SectionTitle>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                    <div style={{ background: COLORS.surfaceElevated, borderRadius: 10, padding: '10px 12px' }}>
+                      <div style={{ fontSize: 11, color: COLORS.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Consumption</div>
+                      <div style={{ fontSize: 17, fontWeight: 800, color: trendColor }}>{arrow} {fmt(Math.abs(diffPct), 1)}%</div>
+                      <div style={{ fontSize: 12, color: COLORS.textSecondary, marginTop: 3 }}>
+                        Last: <strong style={{ color: COLORS.textPrimary }}>{fmt(last)} l/100</strong>
+                      </div>
+                      <div style={{ fontSize: 12, color: COLORS.textSecondary }}>
+                        Avg: {fmt(avg)} l/100
+                      </div>
+                    </div>
+                    <div style={{ background: COLORS.surfaceElevated, borderRadius: 10, padding: '10px 12px' }}>
+                      <div style={{ fontSize: 11, color: COLORS.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Price / L</div>
+                      <div style={{ fontSize: 17, fontWeight: 800, color: priceBetter ? COLORS.success : COLORS.danger }}>
+                        {priceBetter ? '▼' : '▲'} {fmt(Math.abs(priceDiff), 1)}%
+                      </div>
+                      <div style={{ fontSize: 12, color: COLORS.textSecondary, marginTop: 3 }}>
+                        Last: <strong style={{ color: COLORS.textPrimary }}>{fmt(lastPrice, 2)} {currency}</strong>
+                      </div>
+                      <div style={{ fontSize: 12, color: COLORS.textSecondary }}>
+                        Avg: {fmt(avgPrice, 2)} {currency}
+                      </div>
+                    </div>
+                  </div>
+                </Card>
+              );
+            })()}
+
+            {/* ── Consumption chart (with optional goal line) ── */}
             <ChartCard
               key={`consumption-${theme}`}
               title="Consumption trend (l/100 km)"
-              labels={stats.consumptionSeries.map((x) => x.date.slice(5))}
-              values={stats.consumptionSeries.map((x) => Number(fmt(x.value, 2)))}
+              labels={filteredStats.consumptionSeries.map((x) => x.date.slice(5))}
+              values={filteredStats.consumptionSeries.map((x) => Number(fmt(x.value, 2)))}
               type="line"
               color={COLORS.accent}
               unit="l/100km"
+              goalLine={consumptionTarget > 0 ? { value: consumptionTarget, label: `Target ${consumptionTarget} l/100`, color: COLORS.danger } : undefined}
             />
             <ChartCard
               key={`monthly-cost-${theme}`}
               title="Monthly fuel cost"
-              labels={stats.monthlyCost.map((x) => x.month.slice(2))}
-              values={stats.monthlyCost.map((x) => Number(fmt(x.value, 2)))}
+              labels={filteredStats.monthlyCost.map((x) => x.month.slice(2))}
+              values={filteredStats.monthlyCost.map((x) => Number(fmt(x.value, 2)))}
               type="bar"
               color={COLORS.warning}
               unit={currency}
             />
-            <ChartCard
-              key={`price-history-${theme}`}
-              title="Fuel price history"
-              labels={stats.priceSeries.map((x) => x.date.slice(5))}
-              values={stats.priceSeries.map((x) => Number(fmt(x.value, 2)))}
-              type="line"
-              color={COLORS.success}
-              unit={`${currency}/L`}
-            />
+
+            {/* ── Fuel price chart with cheapest/costliest annotations (feature 8) ── */}
+            {(() => {
+              const prices = filteredStats.priceSeries.map((x) => x.value);
+              if (!prices.length) return (
+                <ChartCard
+                  key={`price-history-${theme}`}
+                  title="Fuel price history"
+                  labels={[]}
+                  values={[]}
+                  type="line"
+                  color={COLORS.success}
+                  unit={`${currency}/L`}
+                />
+              );
+              const minPrice = Math.min(...prices);
+              const maxPrice = Math.max(...prices);
+              const pointColors = prices.map((v) => {
+                if (v === minPrice) return COLORS.success;
+                if (v === maxPrice) return COLORS.danger;
+                return null; // normal points use the chart's default color
+              });
+              return (
+                <>
+                  <ChartCard
+                    key={`price-history-${theme}`}
+                    title="Fuel price history"
+                    labels={filteredStats.priceSeries.map((x) => x.date.slice(5))}
+                    values={prices.map((v) => Number(fmt(v, 2)))}
+                    type="line"
+                    color={COLORS.success}
+                    unit={`${currency}/L`}
+                    pointColors={pointColors}
+                  />
+                  {prices.length >= 2 && (
+                    <div style={{ display: 'flex', gap: 16, paddingLeft: 4, marginTop: -6 }}>
+                      <span style={{ fontSize: 12, color: COLORS.success, display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <span style={{ width: 10, height: 10, borderRadius: '50%', background: COLORS.success, display: 'inline-block' }} />
+                        Cheapest: {fmt(minPrice, 2)} {currency}/L
+                      </span>
+                      <span style={{ fontSize: 12, color: COLORS.danger, display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <span style={{ width: 10, height: 10, borderRadius: '50%', background: COLORS.danger, display: 'inline-block' }} />
+                        Costliest: {fmt(maxPrice, 2)} {currency}/L
+                      </span>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+
             <ChartCard
               key={`monthly-dist-${theme}`}
               title="Distance per month"
-              labels={stats.monthlyDistance.map((x) => x.month.slice(2))}
-              values={stats.monthlyDistance.map((x) => Number(fmt(x.value, 0)))}
+              labels={filteredStats.monthlyDistance.map((x) => x.month.slice(2))}
+              values={filteredStats.monthlyDistance.map((x) => Number(fmt(x.value, 0)))}
               type="bar"
               color={COLORS.accent}
               unit="km"
@@ -1824,6 +1983,48 @@ export default function App() {
                   <option key={cur} value={cur}>{cur}</option>
                 ))}
               </Select>
+            </Card>
+
+            <Card>
+              <SectionTitle icon="🎯">Consumption target</SectionTitle>
+              <div style={{ color: COLORS.textSecondary, fontSize: 13, marginBottom: 10 }}>
+                Set a target L/100 km — a dashed reference line will appear on the consumption chart.
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <Input
+                  type="number"
+                  step="0.1"
+                  placeholder={`Current avg: ${fmt(stats.avgConsumption)} l/100`}
+                  value={consumptionTargetInput}
+                  onChange={(e) => setConsumptionTargetInput(e.target.value)}
+                  style={{ flex: 1 }}
+                />
+                <Button
+                  type="button"
+                  onClick={() => {
+                    const v = num(consumptionTargetInput);
+                    setConsumptionTarget(v > 0 ? v : 0);
+                    setConsumptionTargetInput('');
+                  }}
+                >
+                  Set
+                </Button>
+              </div>
+              {consumptionTarget > 0 && (
+                <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: 13, color: COLORS.textSecondary }}>
+                    Target: <strong style={{ color: COLORS.danger }}>{consumptionTarget} l/100 km</strong>
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="small"
+                    onClick={() => setConsumptionTarget(0)}
+                  >
+                    ✕ Remove
+                  </Button>
+                </div>
+              )}
             </Card>
 
             {/* Manage vehicles */}
