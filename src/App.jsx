@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import Chart from 'chart.js/auto';
+import { LocalNotifications } from '@capacitor/local-notifications';
+import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 
 const DARK_COLORS = {
   bg: '#0A0A0A',
@@ -51,6 +53,8 @@ const TAB_ITEMS = [
 ];
 
 const CURRENCIES = ['Kč', '€', '$', '£', 'zł', 'kr'];
+
+const VEHICLE_COLORS = ['#3B82F6', '#EF4444', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316', '#6366F1', '#84CC16'];
 
 const MAINT_TYPES = [
   { value: 'oil_change', label: 'Oil Change' },
@@ -697,23 +701,25 @@ function UndoToast({ toast, onUndo }) {
       }}
     >
       <span style={{ flex: 1, fontSize: 14 }}>{toast.message}</span>
-      <button
-        type="button"
-        onClick={onUndo}
-        style={{
-          background: COLORS.accent,
-          color: '#fff',
-          border: 'none',
-          borderRadius: 8,
-          padding: '6px 12px',
-          fontSize: 13,
-          fontWeight: 700,
-          cursor: 'pointer',
-          flexShrink: 0,
-        }}
-      >
-        Undo
-      </button>
+      {toast.restore && (
+        <button
+          type="button"
+          onClick={onUndo}
+          style={{
+            background: COLORS.accent,
+            color: '#fff',
+            border: 'none',
+            borderRadius: 8,
+            padding: '6px 12px',
+            fontSize: 13,
+            fontWeight: 700,
+            cursor: 'pointer',
+            flexShrink: 0,
+          }}
+        >
+          Undo
+        </button>
+      )}
     </div>
   );
 }
@@ -982,8 +988,14 @@ export default function App() {
   const [vehicles, setVehicles] = usePersistentState('fuelpilot_vehicles', []);
   const [refuels, setRefuels] = usePersistentState('fuelpilot_refuels', []);
   const [maintenance, setMaintenance] = usePersistentState('fuelpilot_maintenance', []);
+  const [odometerReadings, setOdometerReadings] = usePersistentState('fuelpilot_odometer_readings', []);
   const [selectedVehicleId, setSelectedVehicleId] = usePersistentState('fuelpilot_selectedVehicleId', '');
+  const [onboarded, setOnboarded] = usePersistentState('fuelpilot_onboarded', false);
+  const [onboardStep, setOnboardStep] = useState(0);
   const [importError, setImportError] = useState('');
+  const [notifDaysBefore, setNotifDaysBefore] = usePersistentState('fuelpilot_notif_days', 7);
+  const [notifDaysInput, setNotifDaysInput] = useState('');
+  const [maintServiceId, setMaintServiceId] = useState(null);
 
   // Apply theme palette before render so all child components see correct colors
   useMemo(() => {
@@ -1052,6 +1064,7 @@ export default function App() {
     fuelType: 'diesel',
     tankSize: '',
     currency: 'Kč',
+    color: VEHICLE_COLORS[0],
   });
 
   const [refuelForm, setRefuelForm] = useState({
@@ -1076,6 +1089,8 @@ export default function App() {
     note: '',
   });
 
+  const [odometerForm, setOdometerForm] = useState({ date: todayIso(), odometer: '' });
+
   useEffect(() => {
     setMaintForm((prev) => ({ ...prev, lastDoneOdometer: currentOdometer || 0 }));
   }, [selectedVehicleId]);
@@ -1095,6 +1110,7 @@ export default function App() {
       fuelType: vehicleForm.fuelType,
       tankSize: num(vehicleForm.tankSize),
       currency: vehicleForm.currency,
+      color: vehicleForm.color || VEHICLE_COLORS[0],
       createdAt: Date.now(),
     };
 
@@ -1108,6 +1124,7 @@ export default function App() {
       fuelType: 'diesel',
       tankSize: '',
       currency: entry.currency,
+      color: VEHICLE_COLORS[0],
     });
   }
 
@@ -1115,6 +1132,7 @@ export default function App() {
     setVehicles((prev) => prev.filter((v) => v.id !== id));
     setRefuels((prev) => prev.filter((r) => r.vehicleId !== id));
     setMaintenance((prev) => prev.filter((m) => m.vehicleId !== id));
+    setOdometerReadings((prev) => prev.filter((r) => r.vehicleId !== id));
     setSelectedVehicleId((prevId) => (prevId === id ? '' : prevId));
     setDeleteVehicleId(null);
   }, []);
@@ -1190,13 +1208,13 @@ export default function App() {
   function showUndoToast(message, restore) {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
     undoTimerRef.current = setTimeout(() => setUndoToast(null), 3000);
-    setUndoToast({ message, restore });
+    setUndoToast({ message, restore: restore || null });
   }
 
   function handleUndo() {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
     undoTimerRef.current = null;
-    if (undoToast) undoToast.restore();
+    if (undoToast?.restore) undoToast.restore();
     setUndoToast(null);
   }
 
@@ -1293,13 +1311,109 @@ export default function App() {
   }
 
   function markMaintenanceDone(item) {
+    const historyEntry = { date: todayIso(), odometer: currentOdometer || item.lastDoneOdometer, cost: item.cost || 0 };
     setMaintenance((prev) =>
       prev.map((m) =>
         m.id === item.id
-          ? { ...m, lastDoneAt: todayIso(), lastDoneOdometer: currentOdometer || m.lastDoneOdometer }
+          ? {
+              ...m,
+              lastDoneAt: todayIso(),
+              lastDoneOdometer: currentOdometer || m.lastDoneOdometer,
+              history: [...(m.history || []), historyEntry],
+            }
           : m
       )
     );
+  }
+
+  // Feature 18: odometer tracker
+  function addOdometerReading(e) {
+    e.preventDefault();
+    if (!selectedVehicle || !odometerForm.odometer) return;
+    const entry = {
+      id: uid('o'),
+      vehicleId: selectedVehicle.id,
+      date: odometerForm.date,
+      odometer: num(odometerForm.odometer),
+      createdAt: Date.now(),
+    };
+    setOdometerReadings((prev) => [...prev, entry]);
+    setOdometerForm({ date: todayIso(), odometer: '' });
+  }
+
+  function handleDeleteOdometerReading(id) {
+    const entry = odometerReadings.find((r) => r.id === id);
+    if (!entry) return;
+    setOdometerReadings((prev) => prev.filter((r) => r.id !== id));
+    showUndoToast('Odometer reading deleted', () => setOdometerReadings((prev) => [...prev, entry]));
+  }
+
+  // Feature 19: update vehicle color
+  function updateVehicleColor(color) {
+    if (!selectedVehicle) return;
+    setVehicles((prev) => prev.map((v) => (v.id === selectedVehicle.id ? { ...v, color } : v)));
+  }
+
+  // Feature 16: schedule local notifications for due maintenance items
+  // Stable numeric ID for a string (same algorithm used for both schedule and cancel)
+  function maintNotifId(id) {
+    let h = 0;
+    for (let i = 0; i < id.length; i++) h = ((h << 5) - h + id.charCodeAt(i)) | 0;
+    return Math.abs(h) || 1;
+  }
+
+  async function scheduleMaintenanceNotifications() {
+    try {
+      const perm = await LocalNotifications.requestPermissions();
+      if (perm.display !== 'granted') return;
+      await LocalNotifications.cancel({ notifications: vehicleMaintenance.map((m) => ({ id: maintNotifId(m.id) })) });
+      const notifications = [];
+      for (const item of vehicleMaintenance) {
+        const status = getMaintenanceStatus(item, currentOdometer);
+        if (status.key === 'due') continue;
+        if (item.intervalDays > 0) {
+          const dueDate = new Date(item.lastDoneAt);
+          dueDate.setDate(dueDate.getDate() + item.intervalDays - notifDaysBefore);
+          if (dueDate > new Date()) {
+            notifications.push({
+              id: maintNotifId(item.id),
+              title: `🔧 ${item.label} due soon`,
+              body: `${selectedVehicle?.name}: ${item.label} is due in ${notifDaysBefore} days`,
+              schedule: { at: dueDate },
+            });
+          }
+        }
+      }
+      if (notifications.length) {
+        await LocalNotifications.schedule({ notifications });
+      }
+      showUndoToast(`Scheduled ${notifications.length} notification(s)`, null);
+    } catch {
+      // Notifications not available on web
+    }
+  }
+
+  // Feature 20: auto-backup to device storage
+  async function autoBackupToDevice() {
+    try {
+      const payload = JSON.stringify({ exportedAt: new Date().toISOString(), vehicles, refuels, maintenance, odometerReadings, selectedVehicleId }, null, 2);
+      await Filesystem.writeFile({
+        path: `fuelpilot-backup-${todayIso()}.json`,
+        data: payload,
+        directory: Directory.Documents,
+        encoding: Encoding.UTF8,
+      });
+      showUndoToast('Backup saved to Documents folder', null);
+    } catch {
+      // Fallback: trigger browser download
+      const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), vehicles, refuels, maintenance, odometerReadings, selectedVehicleId }, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `fuelpilot-backup-${todayIso()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
   }
 
   function updateVehicleCurrency(currency) {
@@ -1347,6 +1461,25 @@ export default function App() {
   const hasMoreHistory = pagedHistory.length < filteredHistory.length;
 
   const historyFiltersActive = Boolean(historySearch || historyDateFrom || historyDateTo || historyCostMin || historyCostMax);
+
+  // Feature 17: cost totals per maintenance type
+  const maintCostByType = useMemo(() => {
+    const totals = {};
+    for (const item of vehicleMaintenance) {
+      const label = MAINT_TYPES.find((t) => t.value === item.type)?.label || item.label || item.type;
+      // Sum: last recorded cost + historical costs
+      const histTotal = (item.history || []).reduce((sum, h) => sum + (h.cost || 0), 0);
+      const lastCost = item.cost || 0;
+      totals[label] = (totals[label] || 0) + lastCost + histTotal;
+    }
+    return Object.entries(totals).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  }, [vehicleMaintenance]);
+
+  // Feature 18: odometer readings for selected vehicle
+  const vehicleOdometerReadings = useMemo(
+    () => (selectedVehicle ? odometerReadings.filter((r) => r.vehicleId === selectedVehicle.id).sort((a, b) => a.date.localeCompare(b.date)) : []),
+    [odometerReadings, selectedVehicle]
+  );
 
   function clearHistoryFilters() {
     setHistorySearch('');
@@ -1409,6 +1542,7 @@ export default function App() {
       vehicles,
       refuels,
       maintenance,
+      odometerReadings,
       selectedVehicleId,
     };
 
@@ -1437,6 +1571,7 @@ export default function App() {
         setVehicles(parsed.vehicles);
         setRefuels(parsed.refuels);
         setMaintenance(parsed.maintenance);
+        if (Array.isArray(parsed.odometerReadings)) setOdometerReadings(parsed.odometerReadings);
 
         if (parsed.selectedVehicleId) {
           setSelectedVehicleId(parsed.selectedVehicleId);
@@ -1471,6 +1606,61 @@ export default function App() {
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
       }}
     >
+      {/* Feature 23: Onboarding overlay */}
+      {!onboarded && (
+        <div style={{ position: 'fixed', inset: 0, background: COLORS.overlay, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+          <div style={{ background: COLORS.surface, borderRadius: 20, padding: 28, maxWidth: 360, width: '100%', boxShadow: '0 20px 60px rgba(0,0,0,0.4)' }}>
+            {onboardStep === 0 && (
+              <>
+                <div style={{ fontSize: 48, textAlign: 'center', marginBottom: 12 }}>⛽</div>
+                <div style={{ fontSize: 20, fontWeight: 800, textAlign: 'center', marginBottom: 8 }}>Welcome to FuelPilot!</div>
+                <div style={{ color: COLORS.textSecondary, textAlign: 'center', lineHeight: 1.6, marginBottom: 20 }}>
+                  Track your fuel costs, maintenance, and driving stats in one place.
+                </div>
+              </>
+            )}
+            {onboardStep === 1 && (
+              <>
+                <div style={{ fontSize: 48, textAlign: 'center', marginBottom: 12 }}>📋</div>
+                <div style={{ fontSize: 20, fontWeight: 800, textAlign: 'center', marginBottom: 8 }}>Refuel Tab</div>
+                <div style={{ color: COLORS.textSecondary, textAlign: 'center', lineHeight: 1.6, marginBottom: 20 }}>
+                  Log every fill-up with date, odometer, liters, price, and station. Filter and search your history anytime.
+                </div>
+              </>
+            )}
+            {onboardStep === 2 && (
+              <>
+                <div style={{ fontSize: 48, textAlign: 'center', marginBottom: 12 }}>📊</div>
+                <div style={{ fontSize: 20, fontWeight: 800, textAlign: 'center', marginBottom: 8 }}>Stats Tab</div>
+                <div style={{ color: COLORS.textSecondary, textAlign: 'center', lineHeight: 1.6, marginBottom: 20 }}>
+                  See consumption charts, cost trends, and compare your last fill-up vs your average.
+                </div>
+              </>
+            )}
+            {onboardStep === 3 && (
+              <>
+                <div style={{ fontSize: 48, textAlign: 'center', marginBottom: 12 }}>🔧</div>
+                <div style={{ fontSize: 20, fontWeight: 800, textAlign: 'center', marginBottom: 8 }}>Maintenance Tab</div>
+                <div style={{ color: COLORS.textSecondary, textAlign: 'center', lineHeight: 1.6, marginBottom: 20 }}>
+                  Set reminders for oil changes, tires, and more. Track service history and get notified before things are due.
+                </div>
+              </>
+            )}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {[0, 1, 2, 3].map((i) => (
+                  <div key={i} style={{ width: 8, height: 8, borderRadius: 999, background: i === onboardStep ? COLORS.accent : COLORS.border }} />
+                ))}
+              </div>
+              {onboardStep < 3 ? (
+                <Button type="button" onClick={() => setOnboardStep((s) => s + 1)}>Next →</Button>
+              ) : (
+                <Button type="button" onClick={() => setOnboarded(true)}>Get started 🚀</Button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       <div
         style={{
           maxWidth: 720,
@@ -1509,6 +1699,9 @@ export default function App() {
         {vehicles.length > 0 && (
           <Card style={{ marginBottom: 14, padding: '12px 14px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              {selectedVehicle?.color && (
+                <div style={{ width: 14, height: 14, borderRadius: 999, background: selectedVehicle.color, flexShrink: 0, border: `2px solid ${selectedVehicle.color}66` }} />
+              )}
               <div style={{ flex: 1 }}>
                 <Label>Active Vehicle</Label>
                 <Select value={selectedVehicleId} onChange={(e) => setSelectedVehicleId(e.target.value)}>
@@ -1584,6 +1777,20 @@ export default function App() {
                   value={vehicleForm.tankSize}
                   onChange={(e) => setVehicleForm((prev) => ({ ...prev, tankSize: e.target.value }))}
                 />
+              </div>
+              <div>
+                <Label>Vehicle color</Label>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
+                  {VEHICLE_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setVehicleForm((prev) => ({ ...prev, color: c }))}
+                      style={{ width: 28, height: 28, borderRadius: 999, background: c, border: vehicleForm.color === c ? `3px solid ${COLORS.textPrimary}` : `2px solid transparent`, cursor: 'pointer', padding: 0 }}
+                      title={c}
+                    />
+                  ))}
+                </div>
               </div>
               <Button type="submit" style={{ width: '100%', marginTop: 4 }}>Save vehicle</Button>
             </form>
@@ -1826,6 +2033,34 @@ export default function App() {
                 </Button>
               )}
             </Card>
+
+            {/* Feature 18: Odometer tracker */}
+            <Card>
+              <SectionTitle icon="🛣️">Odometer readings</SectionTitle>
+              <form onSubmit={addOdometerReading} style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <div>
+                    <Label>Date</Label>
+                    <Input type="date" value={odometerForm.date} onChange={(e) => setOdometerForm((prev) => ({ ...prev, date: e.target.value }))} />
+                  </div>
+                  <div>
+                    <Label>Odometer (km)</Label>
+                    <Input type="number" value={odometerForm.odometer} onChange={(e) => setOdometerForm((prev) => ({ ...prev, odometer: e.target.value }))} />
+                  </div>
+                </div>
+                <Button type="submit" size="small" variant="secondary">+ Log reading</Button>
+              </form>
+              {!vehicleOdometerReadings.length && <div style={{ color: COLORS.textMuted, fontSize: 12 }}>No manual readings logged yet.</div>}
+              <div style={{ display: 'grid', gap: 6 }}>
+                {vehicleOdometerReadings.slice().reverse().slice(0, 10).map((r) => (
+                  <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: COLORS.surfaceElevated, borderRadius: 8, padding: '6px 10px', fontSize: 13 }}>
+                    <span>{formatDate(r.date)}</span>
+                    <strong>{r.odometer.toLocaleString()} km</strong>
+                    <IconButton variant="danger" onClick={() => handleDeleteOdometerReading(r.id)} title="Delete">🗑️</IconButton>
+                  </div>
+                ))}
+              </div>
+            </Card>
               </>
             )}
           </div>
@@ -2028,6 +2263,23 @@ export default function App() {
                         {item.cost > 0 && <div>Cost: {fmt(item.cost)} {currency}</div>}
                       </div>
                       {item.note && <div style={{ color: COLORS.textMuted, marginTop: 4, fontSize: 12, fontStyle: 'italic' }}>💬 {item.note}</div>}
+                      {/* Feature 15: service history log */}
+                      {(item.history || []).length > 0 && (
+                        <details style={{ marginTop: 8 }}>
+                          <summary style={{ fontSize: 12, color: COLORS.accent, cursor: 'pointer', userSelect: 'none' }}>
+                            📜 Service history ({item.history.length} entries)
+                          </summary>
+                          <div style={{ marginTop: 6, display: 'grid', gap: 4 }}>
+                            {item.history.slice().reverse().map((h, i) => (
+                              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: COLORS.textSecondary, background: COLORS.bg, borderRadius: 6, padding: '4px 8px' }}>
+                                <span>{formatDate(h.date)}</span>
+                                <span>{h.odometer.toLocaleString()} km</span>
+                                {h.cost > 0 && <span>{fmt(h.cost)} {currency}</span>}
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
                       {status.key === 'due' && (
                         <Button
                           variant="success"
@@ -2043,6 +2295,25 @@ export default function App() {
                 })}
               </div>
             </Card>
+
+            {/* Feature 17: cost totals per type */}
+            {maintCostByType.length > 0 && (
+              <Card>
+                <SectionTitle icon="💰">Total cost by type</SectionTitle>
+                <div style={{ display: 'grid', gap: 6 }}>
+                  {maintCostByType.map(([label, total]) => (
+                    <div key={label} style={{ display: 'flex', justifyContent: 'space-between', background: COLORS.surfaceElevated, borderRadius: 8, padding: '8px 12px', fontSize: 13 }}>
+                      <span>{label}</span>
+                      <strong style={{ color: COLORS.warning }}>{fmt(total, 2)} {currency}</strong>
+                    </div>
+                  ))}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 12px', fontSize: 13, fontWeight: 700, color: COLORS.textPrimary }}>
+                    <span>Total</span>
+                    <span style={{ color: COLORS.accent }}>{fmt(maintCostByType.reduce((s, [, v]) => s + v, 0), 2)} {currency}</span>
+                  </div>
+                </div>
+              </Card>
+            )}
 
             <Card>
               <SectionTitle icon="➕">Add maintenance</SectionTitle>
@@ -2144,6 +2415,20 @@ export default function App() {
                     </Select>
                   </div>
                 </div>
+                <div>
+                  <Label>Vehicle color</Label>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
+                    {VEHICLE_COLORS.map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        onClick={() => setVehicleForm((prev) => ({ ...prev, color: c }))}
+                        style={{ width: 28, height: 28, borderRadius: 999, background: c, border: vehicleForm.color === c ? `3px solid ${COLORS.textPrimary}` : `2px solid transparent`, cursor: 'pointer', padding: 0 }}
+                        title={c}
+                      />
+                    ))}
+                  </div>
+                </div>
                 <Button type="submit" style={{ width: '100%', marginTop: 2 }}>Add vehicle</Button>
               </form>
             </Card>
@@ -2151,15 +2436,29 @@ export default function App() {
             <Card>
               <SectionTitle icon="⚙">Current vehicle settings</SectionTitle>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                {selectedVehicle.color && <div style={{ width: 14, height: 14, borderRadius: 999, background: selectedVehicle.color }} />}
                 <span style={{ color: COLORS.textSecondary }}>{selectedVehicle.name}</span>
                 <FuelBadge fuelType={selectedVehicle.fuelType} />
               </div>
               <Label>Currency</Label>
-              <Select value={currency} onChange={(e) => updateVehicleCurrency(e.target.value)}>
+              <Select value={currency} onChange={(e) => updateVehicleCurrency(e.target.value)} style={{ marginBottom: 10 }}>
                 {CURRENCIES.map((cur) => (
                   <option key={cur} value={cur}>{cur}</option>
                 ))}
               </Select>
+              {/* Feature 19: vehicle color */}
+              <Label>Vehicle color</Label>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
+                {VEHICLE_COLORS.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => updateVehicleColor(c)}
+                    style={{ width: 28, height: 28, borderRadius: 999, background: c, border: (selectedVehicle.color || VEHICLE_COLORS[0]) === c ? `3px solid ${COLORS.textPrimary}` : `2px solid transparent`, cursor: 'pointer', padding: 0 }}
+                    title={c}
+                  />
+                ))}
+              </div>
             </Card>
 
             <Card>
@@ -2254,6 +2553,10 @@ export default function App() {
                   🗑️ Clear
                 </Button>
               </div>
+              {/* Feature 20: auto-backup */}
+              <Button type="button" variant="secondary" onClick={autoBackupToDevice} style={{ width: '100%', marginBottom: 10 }}>
+                💾 Save backup to device storage
+              </Button>
               <Label>Import backup</Label>
               <Input
                 type="file"
@@ -2261,6 +2564,48 @@ export default function App() {
                 onChange={(e) => importData(e.target.files?.[0])}
               />
               {importError && <div style={{ color: COLORS.danger, marginTop: 6, fontSize: 13 }}>{importError}</div>}
+            </Card>
+
+            {/* Feature 16: notification settings */}
+            <Card>
+              <SectionTitle icon="🔔">Maintenance notifications</SectionTitle>
+              <div style={{ color: COLORS.textSecondary, fontSize: 13, marginBottom: 10 }}>
+                Get notified before a maintenance item is due. Requires notification permission.
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                <Input
+                  type="number"
+                  min="1"
+                  max="90"
+                  placeholder="Days before due"
+                  value={notifDaysInput}
+                  onChange={(e) => setNotifDaysInput(e.target.value)}
+                  style={{ flex: 1 }}
+                />
+                <Button
+                  type="button"
+                  onClick={() => {
+                    const v = num(notifDaysInput);
+                    if (v > 0) { setNotifDaysBefore(v); setNotifDaysInput(''); }
+                  }}
+                >
+                  Set
+                </Button>
+              </div>
+              <div style={{ fontSize: 13, color: COLORS.textSecondary, marginBottom: 10 }}>
+                Notify <strong style={{ color: COLORS.textPrimary }}>{notifDaysBefore} days</strong> before due date
+              </div>
+              <Button type="button" variant="secondary" onClick={scheduleMaintenanceNotifications} style={{ width: '100%' }}>
+                📲 Schedule notifications now
+              </Button>
+            </Card>
+
+            {/* Re-show onboarding */}
+            <Card>
+              <SectionTitle icon="ℹ️">Help</SectionTitle>
+              <Button type="button" variant="secondary" onClick={() => { setOnboarded(false); setOnboardStep(0); }} style={{ width: '100%' }}>
+                📖 Show onboarding again
+              </Button>
             </Card>
 
             <Card>
