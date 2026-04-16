@@ -1619,14 +1619,19 @@ export default function App() {
   const currency = selectedVehicle?.currency || 'Kč';
   // Generate a price table dynamically around the user's last recorded fuel price.
   // The step size scales with the price magnitude so it looks natural for any currency.
+  const PRICE_TABLE_ROWS = 8;
+  const PRICE_TABLE_CENTER_OFFSET = 2; // rows below the base price
+  const PRICE_TABLE_STEP_PCT = 0.05;   // 5% of base price per row
+  // Default base prices (typical retail per-litre prices by common currency)
+  const DEFAULT_BASE_PRICES = { '€': 1.6, '$': 3.5, '£': 1.5, 'zł': 6.5, 'kr': 18 };
   const lastKnownPrice = stats.priceSeries.length > 0
     ? stats.priceSeries[stats.priceSeries.length - 1].value
     : 0;
-  const tablePriceBase = lastKnownPrice > 0 ? lastKnownPrice : (currency === '€' ? 1.6 : currency === '$' ? 3.5 : currency === '£' ? 1.5 : 36);
-  const rawStep = tablePriceBase * 0.05;
+  const tablePriceBase = lastKnownPrice > 0 ? lastKnownPrice : (DEFAULT_BASE_PRICES[currency] ?? 36);
+  const rawStep = tablePriceBase * PRICE_TABLE_STEP_PCT;
   const tableStep = rawStep >= 1 ? Math.round(rawStep) : Math.round(rawStep * 10) / 10;
-  const quickTablePrices = Array.from({ length: 8 }, (_, i) =>
-    Math.round((tablePriceBase - 2 * tableStep + i * tableStep) * 100) / 100
+  const quickTablePrices = Array.from({ length: PRICE_TABLE_ROWS }, (_, i) =>
+    Math.round((tablePriceBase - PRICE_TABLE_CENTER_OFFSET * tableStep + i * tableStep) * 100) / 100
   ).filter((p) => p > 0);
   const TAB_ORDER = { refuel: 0, stats: 1, maintenance: 2, settings: 3 };
 
