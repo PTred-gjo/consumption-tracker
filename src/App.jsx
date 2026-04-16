@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import Chart from 'chart.js/auto';
 
-const COLORS = {
+const DARK_COLORS = {
   bg: '#0A0A0A',
   surface: '#141414',
   surfaceElevated: '#1C1C1E',
@@ -18,6 +18,30 @@ const COLORS = {
   borderLight: '#1C1C1E',
   overlay: 'rgba(0,0,0,0.65)',
 };
+
+const LIGHT_COLORS = {
+  bg: '#F2F2F7',
+  surface: '#FFFFFF',
+  surfaceElevated: '#F2F2F7',
+  accent: '#3B82F6',
+  accentLight: '#60A5FA',
+  success: '#34C759',
+  danger: '#FF3B30',
+  dangerBg: '#FF3B301a',
+  warning: '#FF9500',
+  textPrimary: '#1C1C1E',
+  textSecondary: '#6C6C70',
+  textMuted: '#AEAEB2',
+  border: '#C6C6C8',
+  borderLight: '#E5E5EA',
+  overlay: 'rgba(0,0,0,0.4)',
+};
+
+// Mutable palette — mutated before each render via Object.assign inside App
+let COLORS = { ...DARK_COLORS };
+
+const SWIPE_CANCEL_THRESHOLD = 5; // px; rightward movement that cancels a swipe
+const SKELETON_DURATION_MS = 200; // ms; how long to show skeleton on first render
 
 const TAB_ITEMS = [
   { key: 'refuel', icon: '⛽', label: 'Refuel' },
@@ -305,7 +329,21 @@ function ensureGlobalStyles() {
       from { opacity: 0; transform: translate(-50%, 8px); }
       to   { opacity: 1; transform: translate(-50%, 0); }
     }
-    .fp-tab-content { animation: fp-fadeIn 0.18s ease-out; }
+    @keyframes fp-slide-right {
+      from { opacity: 0; transform: translateX(24px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+    @keyframes fp-slide-left {
+      from { opacity: 0; transform: translateX(-24px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+    @keyframes fp-shimmer {
+      0%   { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+    .fp-tab-content      { animation: fp-fadeIn    0.18s ease-out; }
+    .fp-tab-enter-right  { animation: fp-slide-right 0.2s ease-out; }
+    .fp-tab-enter-left   { animation: fp-slide-left  0.2s ease-out; }
   `;
   document.head.appendChild(style);
 }
@@ -657,13 +695,263 @@ function UndoToast({ toast, onUndo }) {
   );
 }
 
+/* ─── Skeleton loading ─── */
+
+function SkeletonCard({ rows = 3 }) {
+  const shimmerBg = `linear-gradient(90deg, ${COLORS.surfaceElevated} 25%, ${COLORS.border} 50%, ${COLORS.surfaceElevated} 75%)`;
+  return (
+    <Card>
+      {Array.from({ length: rows }, (_, i) => (
+        <div
+          key={i}
+          style={{
+            height: i === 0 ? 20 : 14,
+            width: i === 0 ? '55%' : `${75 + (i % 3) * 10}%`,
+            background: shimmerBg,
+            backgroundSize: '200% 100%',
+            borderRadius: 8,
+            marginBottom: 10,
+            animation: 'fp-shimmer 1.4s ease-in-out infinite',
+          }}
+        />
+      ))}
+    </Card>
+  );
+}
+
+/* ─── Long-press hook ─── */
+
+function useLongPress(callback, delay = 500) {
+  const timerRef = useRef(null);
+
+  function start(e) {
+    // Don't trigger if user is scrolling
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      callback(e);
+    }, delay);
+  }
+
+  function cancel() {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }
+
+  return { onTouchStart: start, onTouchEnd: cancel, onTouchMove: cancel, onContextMenu: (e) => e.preventDefault() };
+}
+
+/* ─── Long-press context menu (bottom sheet style) ─── */
+
+function LongPressMenu({ open, onClose, onEdit, onDelete }) {
+  if (!open) return null;
+  return (
+    <>
+      <div
+        onClick={onClose}
+        style={{ position: 'fixed', inset: 0, zIndex: 9990, background: 'transparent' }}
+      />
+      <div
+        style={{
+          position: 'fixed',
+          bottom: 'calc(96px + env(safe-area-inset-bottom))',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          background: COLORS.surfaceElevated,
+          border: `1px solid ${COLORS.border}`,
+          borderRadius: 16,
+          overflow: 'hidden',
+          zIndex: 9991,
+          boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+          minWidth: 200,
+          animation: 'fp-slide-up 0.2s ease-out',
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => { onEdit(); onClose(); }}
+          style={{
+            width: '100%',
+            padding: '14px 20px',
+            background: 'none',
+            border: 'none',
+            borderBottom: `1px solid ${COLORS.border}`,
+            color: COLORS.textPrimary,
+            fontSize: 15,
+            textAlign: 'left',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <span>✏️</span> Edit
+        </button>
+        <button
+          type="button"
+          onClick={() => { onDelete(); onClose(); }}
+          style={{
+            width: '100%',
+            padding: '14px 20px',
+            background: 'none',
+            border: 'none',
+            color: COLORS.danger,
+            fontSize: 15,
+            textAlign: 'left',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <span>🗑️</span> Delete
+        </button>
+      </div>
+    </>
+  );
+}
+
+/* ─── Swipeable row (swipe left to reveal Edit / Delete) ─── */
+
+function SwipeableRow({ onEdit, onDelete, children }) {
+  const [offset, setOffset] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const startX = useRef(null);
+  const ACTION_WIDTH = 80;
+
+  function handleTouchStart(e) {
+    startX.current = e.touches[0].clientX;
+    setDragging(true);
+  }
+
+  function handleTouchMove(e) {
+    if (startX.current === null) return;
+    const dx = startX.current - e.touches[0].clientX;
+    if (dx > 0) setOffset(Math.min(dx, ACTION_WIDTH));
+    else if (dx < -SWIPE_CANCEL_THRESHOLD) setOffset(0);
+  }
+
+  function handleTouchEnd() {
+    setDragging(false);
+    startX.current = null;
+    setOffset((prev) => (prev >= ACTION_WIDTH / 2 ? ACTION_WIDTH : 0));
+  }
+
+  return (
+    <div style={{ position: 'relative', overflow: 'hidden', borderRadius: 12 }}>
+      {/* Hidden action buttons revealed on swipe */}
+      <div style={{ position: 'absolute', right: 0, top: 0, bottom: 0, display: 'flex', width: ACTION_WIDTH }}>
+        <button
+          type="button"
+          onClick={() => { setOffset(0); onEdit(); }}
+          style={{ flex: 1, background: COLORS.accent, border: 'none', color: '#fff', fontSize: 20, cursor: 'pointer' }}
+        >
+          ✏️
+        </button>
+        <button
+          type="button"
+          onClick={() => { setOffset(0); onDelete(); }}
+          style={{ flex: 1, background: COLORS.danger, border: 'none', color: '#fff', fontSize: 20, cursor: 'pointer' }}
+        >
+          🗑️
+        </button>
+      </div>
+
+      {/* Swipeable content layer */}
+      <div
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        style={{
+          transform: `translateX(-${offset}px)`,
+          transition: dragging ? 'none' : 'transform 0.25s ease',
+          position: 'relative',
+          zIndex: 1,
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Refuel history row (swipe + long-press) ─── */
+
+function RefuelRow({ entry, currency, onEdit, onDelete }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const lp = useLongPress(() => setMenuOpen(true));
+
+  return (
+    <>
+      <SwipeableRow onEdit={() => onEdit(entry)} onDelete={() => onDelete(entry.id)}>
+        <div
+          {...lp}
+          style={{
+            border: `1px solid ${COLORS.borderLight}`,
+            borderRadius: 12,
+            padding: '10px 12px',
+            background: COLORS.surfaceElevated,
+            transition: 'border-color 0.2s',
+            userSelect: 'none',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <strong>{formatDate(entry.date)}</strong>
+              {entry.isFullTank ? (
+                <span style={{ fontSize: 10, color: COLORS.success, background: `${COLORS.success}22`, padding: '1px 6px', borderRadius: 6, fontWeight: 600 }}>FULL</span>
+              ) : (
+                <span style={{ fontSize: 10, color: COLORS.warning, background: `${COLORS.warning}22`, padding: '1px 6px', borderRadius: 6, fontWeight: 600 }}>PARTIAL</span>
+              )}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              <IconButton onClick={() => onEdit(entry)} title="Edit">✏️</IconButton>
+              <IconButton onClick={() => onDelete(entry.id)} title="Delete" variant="danger">🗑️</IconButton>
+            </div>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.textSecondary, fontSize: 13 }}>
+            <span>{fmt(entry.liters, 2)} L · {fmt(entry.pricePerLiter, 2)} {currency}/L</span>
+            <span style={{ fontWeight: 600, color: COLORS.textPrimary }}>{fmt(entry.totalCost, 2)} {currency}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.textMuted, fontSize: 12, marginTop: 4 }}>
+            <span>{entry.odometer.toLocaleString()} km</span>
+            {entry.station && <span>📍 {entry.station}</span>}
+          </div>
+          {entry.note && <div style={{ color: COLORS.textMuted, fontSize: 12, marginTop: 3, fontStyle: 'italic' }}>💬 {entry.note}</div>}
+        </div>
+      </SwipeableRow>
+      <LongPressMenu
+        open={menuOpen}
+        onClose={() => setMenuOpen(false)}
+        onEdit={() => onEdit(entry)}
+        onDelete={() => onDelete(entry.id)}
+      />
+    </>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('refuel');
+  const [tabAnimDir, setTabAnimDir] = useState('right');
+  const [theme, setTheme] = usePersistentState('fuelpilot_theme', 'dark');
+  const [isHydrated, setIsHydrated] = useState(false);
   const [vehicles, setVehicles] = usePersistentState('fuelpilot_vehicles', []);
   const [refuels, setRefuels] = usePersistentState('fuelpilot_refuels', []);
   const [maintenance, setMaintenance] = usePersistentState('fuelpilot_maintenance', []);
   const [selectedVehicleId, setSelectedVehicleId] = usePersistentState('fuelpilot_selectedVehicleId', '');
   const [importError, setImportError] = useState('');
+
+  // Apply theme palette before render so all child components see correct colors
+  useMemo(() => {
+    Object.assign(COLORS, theme === 'light' ? LIGHT_COLORS : DARK_COLORS);
+  }, [theme]);
+
+  // Brief hydration delay to show skeleton placeholders on first render
+  useEffect(() => {
+    const t = setTimeout(() => setIsHydrated(true), SKELETON_DURATION_MS);
+    return () => clearTimeout(t);
+  }, []);
 
   /* Edit / delete modal state */
   const [editRefuelId, setEditRefuelId] = useState(null);
@@ -1044,6 +1332,12 @@ export default function App() {
 
   const currency = selectedVehicle?.currency || 'Kč';
   const quickTablePrices = [25, 30, 35, 40, 45, 50, 55, 60];
+  const TAB_ORDER = { refuel: 0, stats: 1, maintenance: 2, settings: 3 };
+
+  function handleTabChange(newTab) {
+    setTabAnimDir((TAB_ORDER[newTab] || 0) > (TAB_ORDER[activeTab] || 0) ? 'right' : 'left');
+    setActiveTab(newTab);
+  }
 
   return (
     <div
@@ -1064,7 +1358,25 @@ export default function App() {
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
           <span style={{ fontSize: 32 }}>⛽</span>
-          <div style={{ fontSize: 28, fontWeight: 800, color: COLORS.accent, background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentLight})`, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>FuelPilot</div>
+          <div style={{ flex: 1, fontSize: 28, fontWeight: 800, color: COLORS.accent, background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentLight})`, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>FuelPilot</div>
+          <button
+            type="button"
+            onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            style={{
+              background: COLORS.surfaceElevated,
+              border: `1px solid ${COLORS.border}`,
+              borderRadius: 10,
+              padding: '6px 10px',
+              fontSize: 18,
+              cursor: 'pointer',
+              color: COLORS.textSecondary,
+              lineHeight: 1,
+              flexShrink: 0,
+            }}
+          >
+            {theme === 'dark' ? '☀️' : '🌙'}
+          </button>
         </div>
         <div style={{ color: COLORS.textSecondary, marginBottom: 18, fontSize: 13, paddingLeft: 2 }}>
           Smart fuel tracker · real costs per kilometer
@@ -1157,7 +1469,15 @@ export default function App() {
 
         {/* ═══ REFUEL TAB ═══ */}
         {selectedVehicle && activeTab === 'refuel' && (
-          <div className="fp-tab-content" style={{ display: 'grid', gap: 14 }}>
+          <div className={`fp-tab-enter-${tabAnimDir}`} style={{ display: 'grid', gap: 14 }}>
+            {!isHydrated ? (
+              <>
+                <SkeletonCard rows={5} />
+                <SkeletonCard rows={7} />
+                <SkeletonCard rows={4} />
+              </>
+            ) : (
+              <>
             {/* Dashboard */}
             <Card style={{ background: `linear-gradient(135deg, ${COLORS.accent}18, ${COLORS.accent}08)`, border: `1px solid ${COLORS.accent}33` }}>
               <SectionTitle icon="📈">Dashboard</SectionTitle>
@@ -1280,49 +1600,24 @@ export default function App() {
                   .slice()
                   .reverse()
                   .map((entry) => (
-                    <div
+                    <RefuelRow
                       key={entry.id}
-                      style={{
-                        border: `1px solid ${COLORS.borderLight}`,
-                        borderRadius: 12,
-                        padding: '10px 12px',
-                        background: COLORS.surfaceElevated,
-                        transition: 'border-color 0.2s',
-                      }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <strong>{formatDate(entry.date)}</strong>
-                          {entry.isFullTank ? (
-                            <span style={{ fontSize: 10, color: COLORS.success, background: `${COLORS.success}22`, padding: '1px 6px', borderRadius: 6, fontWeight: 600 }}>FULL</span>
-                          ) : (
-                            <span style={{ fontSize: 10, color: COLORS.warning, background: `${COLORS.warning}22`, padding: '1px 6px', borderRadius: 6, fontWeight: 600 }}>PARTIAL</span>
-                          )}
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                          <IconButton onClick={() => openEditRefuel(entry)} title="Edit">✏️</IconButton>
-                          <IconButton onClick={() => handleDeleteRefuel(entry.id)} title="Delete" variant="danger">🗑️</IconButton>
-                        </div>
-                      </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.textSecondary, fontSize: 13 }}>
-                        <span>{fmt(entry.liters, 2)} L · {fmt(entry.pricePerLiter, 2)} {currency}/L</span>
-                        <span style={{ fontWeight: 600, color: COLORS.textPrimary }}>{fmt(entry.totalCost, 2)} {currency}</span>
-                      </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.textMuted, fontSize: 12, marginTop: 4 }}>
-                        <span>{entry.odometer.toLocaleString()} km</span>
-                        {entry.station && <span>📍 {entry.station}</span>}
-                      </div>
-                      {entry.note && <div style={{ color: COLORS.textMuted, fontSize: 12, marginTop: 3, fontStyle: 'italic' }}>💬 {entry.note}</div>}
-                    </div>
+                      entry={entry}
+                      currency={currency}
+                      onEdit={openEditRefuel}
+                      onDelete={handleDeleteRefuel}
+                    />
                   ))}
               </div>
             </Card>
+              </>
+            )}
           </div>
         )}
 
         {/* ═══ STATS TAB ═══ */}
         {selectedVehicle && activeTab === 'stats' && (
-          <div className="fp-tab-content" style={{ display: 'grid', gap: 14 }}>
+          <div className={`fp-tab-enter-${tabAnimDir}`} style={{ display: 'grid', gap: 14 }}>
             {/* Summary row */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
               <StatBox label="Refuels" value={stats.refuelCount} icon="⛽" accent={COLORS.accent} />
@@ -1331,6 +1626,7 @@ export default function App() {
             </div>
 
             <ChartCard
+              key={`consumption-${theme}`}
               title="Consumption trend (l/100 km)"
               labels={stats.consumptionSeries.map((x) => x.date.slice(5))}
               values={stats.consumptionSeries.map((x) => Number(fmt(x.value, 2)))}
@@ -1339,6 +1635,7 @@ export default function App() {
               unit="l/100km"
             />
             <ChartCard
+              key={`monthly-cost-${theme}`}
               title="Monthly fuel cost"
               labels={stats.monthlyCost.map((x) => x.month.slice(2))}
               values={stats.monthlyCost.map((x) => Number(fmt(x.value, 2)))}
@@ -1347,6 +1644,7 @@ export default function App() {
               unit={currency}
             />
             <ChartCard
+              key={`price-history-${theme}`}
               title="Fuel price history"
               labels={stats.priceSeries.map((x) => x.date.slice(5))}
               values={stats.priceSeries.map((x) => Number(fmt(x.value, 2)))}
@@ -1355,6 +1653,7 @@ export default function App() {
               unit={`${currency}/L`}
             />
             <ChartCard
+              key={`monthly-dist-${theme}`}
               title="Distance per month"
               labels={stats.monthlyDistance.map((x) => x.month.slice(2))}
               values={stats.monthlyDistance.map((x) => Number(fmt(x.value, 0)))}
@@ -1367,7 +1666,7 @@ export default function App() {
 
         {/* ═══ MAINTENANCE TAB ═══ */}
         {selectedVehicle && activeTab === 'maintenance' && (
-          <div className="fp-tab-content" style={{ display: 'grid', gap: 14 }}>
+          <div className={`fp-tab-enter-${tabAnimDir}`} style={{ display: 'grid', gap: 14 }}>
             <Card>
               <SectionTitle icon="🔔">Maintenance reminders</SectionTitle>
               {!vehicleMaintenance.length && <EmptyState icon="🔧" message="No maintenance reminders yet. Add one below!" />}
@@ -1468,7 +1767,7 @@ export default function App() {
 
         {/* ═══ SETTINGS TAB ═══ */}
         {selectedVehicle && activeTab === 'settings' && (
-          <div className="fp-tab-content" style={{ display: 'grid', gap: 14 }}>
+          <div className={`fp-tab-enter-${tabAnimDir}`} style={{ display: 'grid', gap: 14 }}>
             <Card>
               <SectionTitle icon="🚗">Add vehicle</SectionTitle>
               <form onSubmit={addVehicle} style={{ display: 'grid', gap: 10 }}>
@@ -1629,7 +1928,7 @@ export default function App() {
               <button
                 key={tab.key}
                 type="button"
-                onClick={() => setActiveTab(tab.key)}
+                onClick={() => handleTabChange(tab.key)}
                 style={{
                   position: 'relative',
                   border: 'none',
