@@ -138,6 +138,9 @@ function computeStats(refuels) {
   const avgConsumption = consumptionSeries.length
     ? consumptionSeries.reduce((sum, item) => sum + item.value, 0) / consumptionSeries.length
     : 0;
+  const lastConsumption = consumptionSeries.length
+    ? consumptionSeries[consumptionSeries.length - 1].value
+    : 0;
 
   const totalCost = refuels.reduce((sum, entry) => sum + entry.totalCost, 0);
   const totalLiters = refuels.reduce((sum, entry) => sum + entry.liters, 0);
@@ -178,6 +181,7 @@ function computeStats(refuels) {
   return {
     consumptionSeries,
     avgConsumption,
+    lastConsumption,
     monthlyCost,
     priceSeries,
     monthlyDistance,
@@ -293,6 +297,15 @@ function ensureGlobalStyles() {
   style.textContent = `
     .${inputClassName}:focus { border-color: ${COLORS.accent} !important; }
     .${buttonClassName}:active { transform: scale(0.97); }
+    @keyframes fp-fadeIn {
+      from { opacity: 0; transform: translateY(5px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fp-slide-up {
+      from { opacity: 0; transform: translate(-50%, 8px); }
+      to   { opacity: 1; transform: translate(-50%, 0); }
+    }
+    .fp-tab-content { animation: fp-fadeIn 0.18s ease-out; }
   `;
   document.head.appendChild(style);
 }
@@ -445,7 +458,7 @@ function FuelBadge({ fuelType }) {
   );
 }
 
-function StatBox({ label, value, icon, accent }) {
+function StatBox({ label, value, icon, accent, trend }) {
   const c = accent || COLORS.accent;
   return (
     <div
@@ -460,6 +473,11 @@ function StatBox({ label, value, icon, accent }) {
       {icon && <div style={{ fontSize: 20, marginBottom: 4 }}>{icon}</div>}
       <div style={{ fontSize: 18, fontWeight: 800, color: c, lineHeight: 1.2 }}>{value}</div>
       <div style={{ fontSize: 11, color: COLORS.textSecondary, marginTop: 3, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+      {trend && (
+        <div style={{ fontSize: 11, color: trend.color, marginTop: 5, fontWeight: 700, letterSpacing: 0.3 }}>
+          {trend.arrow} {fmt(trend.diff, 1)}% last fill
+        </div>
+      )}
     </div>
   );
 }
@@ -592,6 +610,53 @@ function ChartCard({ title, labels, values, type = 'line', color = COLORS.accent
   );
 }
 
+function UndoToast({ toast, onUndo }) {
+  if (!toast) return null;
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        bottom: 'calc(80px + env(safe-area-inset-bottom))',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        background: COLORS.surfaceElevated,
+        color: COLORS.textPrimary,
+        borderRadius: 12,
+        padding: '12px 16px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        boxShadow: '0 4px 24px rgba(0,0,0,0.5)',
+        border: `1px solid ${COLORS.border}`,
+        zIndex: 99999,
+        minWidth: 220,
+        maxWidth: 'calc(100vw - 32px)',
+        animation: 'fp-slide-up 0.2s ease-out',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <span style={{ flex: 1, fontSize: 14 }}>{toast.message}</span>
+      <button
+        type="button"
+        onClick={onUndo}
+        style={{
+          background: COLORS.accent,
+          color: '#fff',
+          border: 'none',
+          borderRadius: 8,
+          padding: '6px 12px',
+          fontSize: 13,
+          fontWeight: 700,
+          cursor: 'pointer',
+          flexShrink: 0,
+        }}
+      >
+        Undo
+      </button>
+    </div>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('refuel');
   const [vehicles, setVehicles] = usePersistentState('fuelpilot_vehicles', []);
@@ -603,12 +668,12 @@ export default function App() {
   /* Edit / delete modal state */
   const [editRefuelId, setEditRefuelId] = useState(null);
   const [editRefuelForm, setEditRefuelForm] = useState(null);
-  const [deleteRefuelId, setDeleteRefuelId] = useState(null);
   const [editMaintId, setEditMaintId] = useState(null);
   const [editMaintForm, setEditMaintForm] = useState(null);
-  const [deleteMaintId, setDeleteMaintId] = useState(null);
   const [confirmClearAll, setConfirmClearAll] = useState(false);
   const [deleteVehicleId, setDeleteVehicleId] = useState(null);
+  const [undoToast, setUndoToast] = useState(null);
+  const undoTimerRef = useRef(null);
 
   const selectedVehicle = vehicles.find((x) => x.id === selectedVehicleId) || null;
 
@@ -775,9 +840,24 @@ export default function App() {
     setEditRefuelForm(null);
   }
 
-  function confirmDeleteRefuel() {
-    setRefuels((prev) => prev.filter((entry) => entry.id !== deleteRefuelId));
-    setDeleteRefuelId(null);
+  function showUndoToast(message, restore) {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = setTimeout(() => setUndoToast(null), 3000);
+    setUndoToast({ message, restore });
+  }
+
+  function handleUndo() {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = null;
+    if (undoToast) undoToast.restore();
+    setUndoToast(null);
+  }
+
+  function handleDeleteRefuel(id) {
+    const entry = refuels.find((r) => r.id === id);
+    if (!entry) return;
+    setRefuels((prev) => prev.filter((r) => r.id !== id));
+    showUndoToast('Refuel deleted', () => setRefuels((prev) => [...prev, entry]));
   }
 
   function openEditRefuel(entry) {
@@ -857,9 +937,11 @@ export default function App() {
     setEditMaintForm(null);
   }
 
-  function confirmDeleteMaint() {
-    setMaintenance((prev) => prev.filter((item) => item.id !== deleteMaintId));
-    setDeleteMaintId(null);
+  function handleDeleteMaint(id) {
+    const item = maintenance.find((m) => m.id === id);
+    if (!item) return;
+    setMaintenance((prev) => prev.filter((m) => m.id !== id));
+    showUndoToast('Reminder deleted', () => setMaintenance((prev) => [...prev, item]));
   }
 
   function markMaintenanceDone(item) {
@@ -875,6 +957,40 @@ export default function App() {
   function updateVehicleCurrency(currency) {
     if (!selectedVehicle) return;
     setVehicles((prev) => prev.map((item) => (item.id === selectedVehicle.id ? { ...item, currency } : item)));
+  }
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const stationSuggestions = useMemo(
+    () => [...new Set(vehicleRefuels.map((r) => r.station).filter(Boolean))],
+    [vehicleRefuels]
+  );
+
+  function exportCSV() {
+    if (!vehicleRefuels.length) return;
+    const headers = ['Date', 'Odometer (km)', 'Liters', `Price/L (${currency})`, `Total (${currency})`, 'Full Tank', 'Station', 'Note'];
+    const rows = vehicleRefuels
+      .slice()
+      .reverse()
+      .map((e) => [
+        e.date,
+        e.odometer,
+        e.liters,
+        e.pricePerLiter,
+        fmt(e.totalCost, 2),
+        e.isFullTank ? 'Yes' : 'No',
+        e.station || '',
+        e.note || '',
+      ]);
+    const csv = [headers, ...rows]
+      .map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `fuelpilot-refuels-${todayIso()}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
   }
 
   function exportData() {
@@ -1042,13 +1158,26 @@ export default function App() {
 
         {/* ═══ REFUEL TAB ═══ */}
         {selectedVehicle && activeTab === 'refuel' && (
-          <div style={{ display: 'grid', gap: 14 }}>
+          <div className="fp-tab-content" style={{ display: 'grid', gap: 14 }}>
             {/* Dashboard */}
             <Card style={{ background: `linear-gradient(135deg, ${COLORS.accent}18, ${COLORS.accent}08)`, border: `1px solid ${COLORS.accent}33` }}>
               <SectionTitle icon="📈">Dashboard</SectionTitle>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <StatBox label="Last Fill" value={stats.lastEntry ? `${fmt(stats.lastEntry.liters, 1)} L` : '-'} accent={COLORS.accent} />
-                <StatBox label="Avg Consumption" value={`${fmt(stats.avgConsumption)} l/100`} accent={COLORS.warning} />
+                <StatBox
+                  label="Avg Consumption"
+                  value={`${fmt(stats.avgConsumption)} l/100`}
+                  accent={COLORS.warning}
+                  trend={
+                    stats.avgConsumption > 0 && stats.lastConsumption > 0 && stats.consumptionSeries.length > 1
+                      ? {
+                          arrow: stats.lastConsumption > stats.avgConsumption ? '▲' : '▼',
+                          diff: Math.abs(((stats.lastConsumption - stats.avgConsumption) / stats.avgConsumption) * 100),
+                          color: stats.lastConsumption > stats.avgConsumption ? COLORS.danger : COLORS.success,
+                        }
+                      : null
+                  }
+                />
                 <StatBox label="Avg Cost / km" value={`${fmt(stats.avgCostPerKm)} ${currency}`} accent={COLORS.success} />
                 <StatBox label="Total Distance" value={`${fmt(stats.totalDistance, 0)} km`} accent={COLORS.accentLight} />
               </div>
@@ -1129,7 +1258,10 @@ export default function App() {
                   </div>
                   <div>
                     <Label>Station</Label>
-                    <Input value={refuelForm.station} onChange={(e) => setRefuelForm((prev) => ({ ...prev, station: e.target.value }))} />
+                    <Input list="fp-stations" value={refuelForm.station} onChange={(e) => setRefuelForm((prev) => ({ ...prev, station: e.target.value }))} />
+                    <datalist id="fp-stations">
+                      {stationSuggestions.map((s) => <option key={s} value={s} />)}
+                    </datalist>
                   </div>
                 </div>
                 <div>
@@ -1170,7 +1302,7 @@ export default function App() {
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                           <IconButton onClick={() => openEditRefuel(entry)} title="Edit">✏️</IconButton>
-                          <IconButton onClick={() => setDeleteRefuelId(entry.id)} title="Delete" variant="danger">🗑️</IconButton>
+                          <IconButton onClick={() => handleDeleteRefuel(entry.id)} title="Delete" variant="danger">🗑️</IconButton>
                         </div>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.textSecondary, fontSize: 13 }}>
@@ -1191,7 +1323,7 @@ export default function App() {
 
         {/* ═══ STATS TAB ═══ */}
         {selectedVehicle && activeTab === 'stats' && (
-          <div style={{ display: 'grid', gap: 14 }}>
+          <div className="fp-tab-content" style={{ display: 'grid', gap: 14 }}>
             {/* Summary row */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
               <StatBox label="Refuels" value={stats.refuelCount} icon="⛽" accent={COLORS.accent} />
@@ -1236,7 +1368,7 @@ export default function App() {
 
         {/* ═══ MAINTENANCE TAB ═══ */}
         {selectedVehicle && activeTab === 'maintenance' && (
-          <div style={{ display: 'grid', gap: 14 }}>
+          <div className="fp-tab-content" style={{ display: 'grid', gap: 14 }}>
             <Card>
               <SectionTitle icon="🔔">Maintenance reminders</SectionTitle>
               {!vehicleMaintenance.length && <EmptyState icon="🔧" message="No maintenance reminders yet. Add one below!" />}
@@ -1253,7 +1385,7 @@ export default function App() {
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                           <IconButton onClick={() => openEditMaint(item)} title="Edit">✏️</IconButton>
-                          <IconButton onClick={() => setDeleteMaintId(item.id)} title="Delete" variant="danger">🗑️</IconButton>
+                          <IconButton onClick={() => handleDeleteMaint(item.id)} title="Delete" variant="danger">🗑️</IconButton>
                         </div>
                       </div>
                       <div style={{ color: COLORS.textSecondary, fontSize: 13, lineHeight: 1.6 }}>
@@ -1337,7 +1469,7 @@ export default function App() {
 
         {/* ═══ SETTINGS TAB ═══ */}
         {selectedVehicle && activeTab === 'settings' && (
-          <div style={{ display: 'grid', gap: 14 }}>
+          <div className="fp-tab-content" style={{ display: 'grid', gap: 14 }}>
             <Card>
               <SectionTitle icon="🚗">Add vehicle</SectionTitle>
               <form onSubmit={addVehicle} style={{ display: 'grid', gap: 10 }}>
@@ -1433,16 +1565,17 @@ export default function App() {
             )}
 
             <Card>
-              <SectionTitle icon="💾">Export / Import JSON</SectionTitle>
+              <SectionTitle icon="💾">Export / Import</SectionTitle>
               <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-                <Button type="button" onClick={exportData} style={{ flex: 1 }}>📤 Export data</Button>
+                <Button type="button" onClick={exportData} style={{ flex: 1 }}>📤 JSON</Button>
+                <Button type="button" variant="secondary" onClick={exportCSV} style={{ flex: 1 }} disabled={!vehicleRefuels.length}>📊 CSV</Button>
                 <Button
                   type="button"
                   variant="danger"
                   onClick={() => setConfirmClearAll(true)}
                   style={{ flex: 1 }}
                 >
-                  🗑️ Clear all
+                  🗑️ Clear
                 </Button>
               </div>
               <Label>Import backup</Label>
@@ -1581,7 +1714,7 @@ export default function App() {
             </div>
             <div>
               <Label>Station</Label>
-              <Input value={editRefuelForm.station} onChange={(e) => setEditRefuelForm((prev) => ({ ...prev, station: e.target.value }))} />
+              <Input list="fp-stations" value={editRefuelForm.station} onChange={(e) => setEditRefuelForm((prev) => ({ ...prev, station: e.target.value }))} />
             </div>
             <div>
               <Label>Note</Label>
@@ -1591,17 +1724,6 @@ export default function App() {
           </div>
         )}
       </Modal>
-
-      {/* Delete Refuel Confirm */}
-      <ConfirmDialog
-        open={Boolean(deleteRefuelId)}
-        title="Delete Refuel"
-        message="Are you sure you want to delete this refuel entry? This action cannot be undone."
-        confirmLabel="Delete"
-        confirmVariant="danger"
-        onConfirm={confirmDeleteRefuel}
-        onCancel={() => setDeleteRefuelId(null)}
-      />
 
       {/* Edit Maintenance Modal */}
       <Modal open={Boolean(editMaintId)} title="Edit Maintenance" onClose={() => { setEditMaintId(null); setEditMaintForm(null); }}>
@@ -1660,17 +1782,6 @@ export default function App() {
         )}
       </Modal>
 
-      {/* Delete Maintenance Confirm */}
-      <ConfirmDialog
-        open={Boolean(deleteMaintId)}
-        title="Delete Maintenance"
-        message="Are you sure you want to delete this maintenance reminder? This action cannot be undone."
-        confirmLabel="Delete"
-        confirmVariant="danger"
-        onConfirm={confirmDeleteMaint}
-        onCancel={() => setDeleteMaintId(null)}
-      />
-
       {/* Delete Vehicle Confirm */}
       <ConfirmDialog
         open={Boolean(deleteVehicleId)}
@@ -1698,6 +1809,8 @@ export default function App() {
         }}
         onCancel={() => setConfirmClearAll(false)}
       />
+
+      <UndoToast toast={undoToast} onUndo={handleUndo} />
     </div>
   );
 }
