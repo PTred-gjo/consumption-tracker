@@ -959,7 +959,6 @@ export default function App() {
     setVehicles((prev) => prev.map((item) => (item.id === selectedVehicle.id ? { ...item, currency } : item)));
   }
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   const stationSuggestions = useMemo(
     () => [...new Set(vehicleRefuels.map((r) => r.station).filter(Boolean))],
     [vehicleRefuels]
@@ -1241,7 +1240,7 @@ export default function App() {
                     <Input
                       value={`${fmt(num(refuelForm.liters) * num(refuelForm.pricePerLiter), 2)} ${currency}`}
                       readOnly
-                      style={{ color: COLORS.textSecondary }}
+                      style={{ color: COLORS.textPrimary, opacity: 0.7 }}
                     />
                   </div>
                 </div>
