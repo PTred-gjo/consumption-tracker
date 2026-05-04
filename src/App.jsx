@@ -113,9 +113,10 @@ function getVehicleRefuels(refuels, vehicleId) {
 }
 
 function computeConsumptionSeries(refuels) {
+  // Primary: accurate fill-to-full method — only emits points between two brimmed tanks.
   let accumulatedLiters = 0;
   let lastFullOdometer = null;
-  const points = [];
+  const fullTankPoints = [];
 
   for (const entry of refuels) {
     accumulatedLiters += entry.liters;
@@ -124,7 +125,7 @@ function computeConsumptionSeries(refuels) {
       if (lastFullOdometer !== null) {
         const distance = entry.odometer - lastFullOdometer;
         if (distance > 0) {
-          points.push({
+          fullTankPoints.push({
             date: entry.date,
             odometer: entry.odometer,
             value: (accumulatedLiters / distance) * 100,
@@ -139,7 +140,35 @@ function computeConsumptionSeries(refuels) {
     }
   }
 
-  return points;
+  if (fullTankPoints.length > 0) return { points: fullTankPoints, isRolling: false };
+
+  // Fallback: rolling 3-fill window for users who rarely/never fill full.
+  // For each window [i-2, i-1, i] we use the liters of fills i-1 and i over the
+  // distance from fill i-2 to fill i. The first fill's liters are excluded because
+  // they replaced fuel consumed before this window's starting odometer.
+  const PARTIAL_WINDOW = 3;
+  const rollingPoints = [];
+  if (refuels.length >= PARTIAL_WINDOW) {
+    for (let i = PARTIAL_WINDOW - 1; i < refuels.length; i++) {
+      const windowStart = i - PARTIAL_WINDOW + 1;
+      const distance = refuels[i].odometer - refuels[windowStart].odometer;
+      if (distance <= 0) continue;
+      let sumLiters = 0;
+      for (let j = windowStart + 1; j <= i; j++) {
+        sumLiters += refuels[j].liters;
+      }
+      if (sumLiters <= 0) continue;
+      rollingPoints.push({
+        date: refuels[i].date,
+        odometer: refuels[i].odometer,
+        value: (sumLiters / distance) * 100,
+        liters: sumLiters,
+        distance,
+      });
+    }
+  }
+
+  return { points: rollingPoints, isRolling: rollingPoints.length > 0 };
 }
 
 function computeStats(refuels) {
@@ -168,11 +197,11 @@ function computeStats(refuels) {
   const firstEntry = refuels[0];
   const lastEntry = refuels[refuels.length - 1];
 
-  const consumptionSeries = computeConsumptionSeries(refuels);
+  const { points: consumptionSeries, isRolling } = computeConsumptionSeries(refuels);
 
   // Distance-weighted average consumption: total fuel consumed / total distance × 100
   let avgConsumption = 0;
-  let isEstimatedConsumption = false;
+  let isEstimatedConsumption = isRolling;
   if (consumptionSeries.length) {
     const totalSeriesFuel = consumptionSeries.reduce((sum, p) => sum + p.liters, 0);
     const totalSeriesDist = consumptionSeries.reduce((sum, p) => sum + p.distance, 0);
@@ -1947,7 +1976,7 @@ export default function App() {
               )}
               {stats.isEstimatedConsumption && (
                 <div style={{ marginTop: 8, fontSize: 11, color: COLORS.textMuted, paddingLeft: 2 }}>
-                  * Estimated — log full-tank fills for accurate consumption
+                  * Estimated from partial fills — log full-tank fills for best accuracy
                 </div>
               )}
             </Card>
@@ -2130,7 +2159,7 @@ export default function App() {
                       key={entry.id}
                       entry={entry}
                       currency={currency}
-                      consumption={entry.isFullTank ? (consumptionByKey.get(`${entry.odometer}_${entry.date}`) ?? null) : null}
+                      consumption={consumptionByKey.get(`${entry.odometer}_${entry.date}`) ?? null}
                       onEdit={openEditRefuel}
                       onDelete={handleDeleteRefuel}
                     />
