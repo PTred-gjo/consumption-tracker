@@ -148,6 +148,9 @@ function computeStats(refuels) {
       consumptionSeries: [],
       avgConsumption: 0,
       isEstimatedConsumption: false,
+      bestConsumption: 0,
+      worstConsumption: 0,
+      avgDistancePerFill: 0,
       monthlyCost: [],
       priceSeries: [],
       monthlyDistance: [],
@@ -180,9 +183,28 @@ function computeStats(refuels) {
     ? consumptionSeries[consumptionSeries.length - 1].value
     : 0;
 
+  // Best (lowest) and worst (highest) consumption from the series
+  const bestConsumption = consumptionSeries.length
+    ? Math.min(...consumptionSeries.map((p) => p.value))
+    : 0;
+  const worstConsumption = consumptionSeries.length
+    ? Math.max(...consumptionSeries.map((p) => p.value))
+    : 0;
+
   const totalCost = refuels.reduce((sum, entry) => sum + entry.totalCost, 0);
   const totalLiters = refuels.reduce((sum, entry) => sum + entry.liters, 0);
   const totalDistance = Math.max(0, lastEntry.odometer - firstEntry.odometer);
+
+  // Average distance between fill-ups (using odometer deltas between consecutive entries)
+  let avgDistancePerFill = 0;
+  if (refuels.length > 1) {
+    const deltas = [];
+    for (let i = 1; i < refuels.length; i += 1) {
+      const d = refuels[i].odometer - refuels[i - 1].odometer;
+      if (d > 0) deltas.push(d);
+    }
+    if (deltas.length) avgDistancePerFill = deltas.reduce((s, v) => s + v, 0) / deltas.length;
+  }
 
   // Fallback: estimate consumption from tracked fuel / total distance when no full-tank series data.
   // Mirrors the avgCostPerKm logic: exclude the first refuel (it fills the baseline tank).
@@ -237,6 +259,9 @@ function computeStats(refuels) {
     consumptionSeries,
     avgConsumption,
     isEstimatedConsumption,
+    bestConsumption,
+    worstConsumption,
+    avgDistancePerFill,
     lastConsumption,
     monthlyCost,
     priceSeries,
@@ -528,7 +553,7 @@ function FuelBadge({ fuelType }) {
   );
 }
 
-function StatBox({ label, value, icon, accent, trend }) {
+function StatBox({ label, value, icon, accent, trend, sub }) {
   const c = accent || COLORS.accent;
   return (
     <div
@@ -543,6 +568,7 @@ function StatBox({ label, value, icon, accent, trend }) {
       {icon && <div style={{ fontSize: 20, marginBottom: 4 }}>{icon}</div>}
       <div style={{ fontSize: 18, fontWeight: 800, color: c, lineHeight: 1.2 }}>{value}</div>
       <div style={{ fontSize: 11, color: COLORS.textSecondary, marginTop: 3, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+      {sub && <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 3 }}>{sub}</div>}
       {trend && (
         <div style={{ fontSize: 11, color: trend.color, marginTop: 5, fontWeight: 700, letterSpacing: 0.3 }}>
           {trend.arrow} {fmt(trend.diff, 1)}% last fill
@@ -935,7 +961,7 @@ function SwipeableRow({ onEdit, onDelete, children }) {
 
 /* ─── Refuel history row (swipe + long-press) ─── */
 
-function RefuelRow({ entry, currency, onEdit, onDelete }) {
+function RefuelRow({ entry, currency, consumption, onEdit, onDelete }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const lp = useLongPress(() => setMenuOpen(true));
 
@@ -973,7 +999,12 @@ function RefuelRow({ entry, currency, onEdit, onDelete }) {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.textMuted, fontSize: 12, marginTop: 4 }}>
             <span>{entry.odometer.toLocaleString()} km</span>
-            {entry.station && <span>📍 {entry.station}</span>}
+            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {consumption != null && (
+                <span style={{ color: COLORS.accent, fontWeight: 600 }}>⛽ {fmt(consumption)} l/100km</span>
+              )}
+              {entry.station && <span>📍 {entry.station}</span>}
+            </span>
           </div>
           {entry.note && <div style={{ color: COLORS.textMuted, fontSize: 12, marginTop: 3, fontStyle: 'italic' }}>💬 {entry.note}</div>}
           {entry.photo && (
@@ -1459,6 +1490,15 @@ export default function App() {
   // Sorted newest-first history for the Refuel tab
   const sortedHistory = useMemo(() => vehicleRefuels.slice().reverse(), [vehicleRefuels]);
 
+  // Map from "odometer_date" → consumption value for full-tank entries (used in history rows)
+  const consumptionByKey = useMemo(() => {
+    const map = new Map();
+    for (const point of stats.consumptionSeries) {
+      map.set(`${point.odometer}_${point.date}`, point.value);
+    }
+    return map;
+  }, [stats.consumptionSeries]);
+
   // Filtered history (feature 10)
   const filteredHistory = useMemo(() => {
     const search = historySearch.trim().toLowerCase();
@@ -1757,6 +1797,11 @@ export default function App() {
               </div>
               {selectedVehicle && <FuelBadge fuelType={selectedVehicle.fuelType} />}
             </div>
+            {currentOdometer > 0 && (
+              <div style={{ marginTop: 8, fontSize: 12, color: COLORS.textSecondary, paddingLeft: 2 }}>
+                🛣️ Current odometer: <strong style={{ color: COLORS.textPrimary }}>{currentOdometer.toLocaleString()} km</strong>
+              </div>
+            )}
           </Card>
         )}
 
@@ -1855,10 +1900,17 @@ export default function App() {
             <Card style={{ background: `linear-gradient(135deg, ${COLORS.accent}18, ${COLORS.accent}08)`, border: `1px solid ${COLORS.accent}33` }}>
               <SectionTitle icon="📈">Dashboard</SectionTitle>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <StatBox label="Last Fill" value={stats.lastEntry ? `${fmt(stats.lastEntry.liters, 1)} L` : '-'} accent={COLORS.accent} />
+                <StatBox
+                  label="Last Fill"
+                  value={stats.lastEntry ? `${fmt(stats.lastEntry.liters, 1)} L` : '-'}
+                  icon="⛽"
+                  accent={COLORS.accent}
+                  sub={stats.lastEntry ? `${formatDate(stats.lastEntry.date)} · ${fmt(stats.lastEntry.totalCost, 0)} ${currency}` : null}
+                />
                 <StatBox
                   label="Avg Consumption"
-                  value={stats.avgConsumption > 0 ? `${fmt(stats.avgConsumption)} l/100${stats.isEstimatedConsumption ? ' (est.)' : ''}` : '-'}
+                  value={stats.avgConsumption > 0 ? `${fmt(stats.avgConsumption)} l/100km${stats.isEstimatedConsumption ? '*' : ''}` : '-'}
+                  icon="📊"
                   accent={COLORS.warning}
                   trend={
                     stats.avgConsumption > 0 && stats.lastConsumption > 0 && stats.consumptionSeries.length > 1
@@ -1870,8 +1922,8 @@ export default function App() {
                       : null
                   }
                 />
-                <StatBox label="Avg Cost / km" value={`${fmt(stats.avgCostPerKm)} ${currency}`} accent={COLORS.success} />
-                <StatBox label="Total Distance" value={`${fmt(stats.totalDistance, 0)} km`} accent={COLORS.accentLight} />
+                <StatBox label="Avg Cost / km" value={`${fmt(stats.avgCostPerKm)} ${currency}`} icon="💰" accent={COLORS.success} />
+                <StatBox label="Odometer" value={currentOdometer > 0 ? `${currentOdometer.toLocaleString()} km` : '-'} icon="🛣️" accent={COLORS.accentLight} />
               </div>
               {stats.refuelCount > 0 && (
                 <div style={{ display: 'flex', justifyContent: 'space-around', marginTop: 12, paddingTop: 10, borderTop: `1px solid ${COLORS.border}` }}>
@@ -1887,6 +1939,15 @@ export default function App() {
                     <div style={{ fontSize: 13, fontWeight: 700 }}>{fmt(stats.totalCost, 0)} {currency}</div>
                     <div style={{ fontSize: 10, color: COLORS.textSecondary }}>Total Spent</div>
                   </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 13, fontWeight: 700 }}>{fmt(stats.totalDistance, 0)} km</div>
+                    <div style={{ fontSize: 10, color: COLORS.textSecondary }}>Distance</div>
+                  </div>
+                </div>
+              )}
+              {stats.isEstimatedConsumption && (
+                <div style={{ marginTop: 8, fontSize: 11, color: COLORS.textMuted, paddingLeft: 2 }}>
+                  * Estimated — log full-tank fills for accurate consumption
                 </div>
               )}
             </Card>
@@ -1937,6 +1998,15 @@ export default function App() {
                     />
                   </div>
                 </div>
+                {/* Real-time cost/km preview based on avg consumption */}
+                {stats.avgConsumption > 0 && num(refuelForm.pricePerLiter) > 0 && (
+                  <div style={{ fontSize: 12, color: COLORS.textSecondary, background: COLORS.surfaceElevated, borderRadius: 8, padding: '6px 10px', display: 'flex', justifyContent: 'space-between' }}>
+                    <span>Est. cost/km at this price</span>
+                    <strong style={{ color: COLORS.accent }}>
+                      {fmt((stats.avgConsumption * num(refuelForm.pricePerLiter)) / 100, 3)} {currency}/km
+                    </strong>
+                  </div>
+                )}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                   <div>
                     <Label>Tank Type</Label>
@@ -2060,6 +2130,7 @@ export default function App() {
                       key={entry.id}
                       entry={entry}
                       currency={currency}
+                      consumption={entry.isFullTank ? (consumptionByKey.get(`${entry.odometer}_${entry.date}`) ?? null) : null}
                       onEdit={openEditRefuel}
                       onDelete={handleDeleteRefuel}
                     />
@@ -2148,6 +2219,41 @@ export default function App() {
               <StatBox label="Total Cost" value={`${fmt(filteredStats.totalCost, 0)} ${currency}`} icon="💰" accent={COLORS.warning} />
               <StatBox label="Distance" value={`${fmt(filteredStats.totalDistance, 0)} km`} icon="🛣️" accent={COLORS.success} />
             </div>
+
+            {/* ── Fuel Insights card ── */}
+            {filteredStats.consumptionSeries.length > 0 && (
+              <Card>
+                <SectionTitle icon="💡">Fuel Insights</SectionTitle>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                  <StatBox
+                    label="Best Fill"
+                    value={`${fmt(filteredStats.bestConsumption)} l/100km`}
+                    icon="🏆"
+                    accent={COLORS.success}
+                  />
+                  <StatBox
+                    label="Worst Fill"
+                    value={`${fmt(filteredStats.worstConsumption)} l/100km`}
+                    icon="⚠️"
+                    accent={COLORS.danger}
+                  />
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <StatBox
+                    label="Avg dist/fill"
+                    value={filteredStats.avgDistancePerFill > 0 ? `${fmt(filteredStats.avgDistancePerFill, 0)} km` : '-'}
+                    icon="📏"
+                    accent={COLORS.accentLight}
+                  />
+                  <StatBox
+                    label="Total Fuel"
+                    value={`${fmt(filteredStats.totalLiters, 0)} L`}
+                    icon="⛽"
+                    accent={COLORS.accent}
+                  />
+                </div>
+              </Card>
+            )}
 
             {/* ── Last fill vs average (feature 6) ── */}
             {filteredStats.consumptionSeries.length >= 2 && (() => {
@@ -2722,6 +2828,18 @@ export default function App() {
                   transition: 'color 0.2s, background 0.2s',
                 }}
               >
+                {isActive && (
+                  <span style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    width: 24,
+                    height: 3,
+                    background: COLORS.accent,
+                    borderRadius: '0 0 4px 4px',
+                  }} />
+                )}
                 <span style={{ fontSize: 20 }}>{tab.icon}</span>
                 <span>{tab.label}</span>
                 {showBadge && (
