@@ -66,8 +66,11 @@ const MAINT_TYPES = [
 
 const FUEL_LABELS = { diesel: 'Diesel', petrol: 'Petrol', lpg: 'LPG', ev: 'EV' };
 
-// Feature 28: trip / purpose tags
-const TRIP_TAGS = ['Commute', 'Road Trip', 'Work', 'Personal'];
+// Feature 28: trip / purpose tags (default list — overridable via settings)
+const DEFAULT_TRIP_TAGS = ['Commute', 'Road Trip', 'Work', 'Personal'];
+
+// Feature 7 (CO₂): kg CO₂ emitted per litre of fuel
+const CO2_FACTORS = { diesel: 2.68, petrol: 2.31, lpg: 1.51, ev: 0 };
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
@@ -193,6 +196,7 @@ function computeStats(refuels) {
       lastEntry: null,
       firstEntry: null,
       totalLiters: 0,
+      totalCo2: 0,
       refuelCount: 0,
     };
   }
@@ -225,6 +229,7 @@ function computeStats(refuels) {
 
   const totalCost = refuels.reduce((sum, entry) => sum + entry.totalCost, 0);
   const totalLiters = refuels.reduce((sum, entry) => sum + entry.liters, 0);
+  const totalCo2 = refuels.reduce((sum, entry) => sum + entry.liters * (CO2_FACTORS[entry.fuelType] ?? CO2_FACTORS.petrol), 0);
   const totalDistance = Math.max(0, lastEntry.odometer - firstEntry.odometer);
 
   // Average distance between fill-ups (using odometer deltas between consecutive entries)
@@ -305,6 +310,7 @@ function computeStats(refuels) {
     lastEntry,
     firstEntry,
     totalLiters,
+    totalCo2,
     refuelCount: refuels.length,
   };
 }
@@ -1134,37 +1140,55 @@ function SwipeableRow({ onEdit, onDelete, children }) {
 
 /* ─── Refuel history row (swipe + long-press) ─── */
 
-function RefuelRow({ entry, currency, consumption, onEdit, onDelete }) {
+function RefuelRow({ entry, currency, consumption, onEdit, onDelete, warnings, bulkSelectMode, isSelected, onToggleSelect }) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const lp = useLongPress(() => setMenuOpen(true));
+  const lp = useLongPress(() => {
+    if (!bulkSelectMode) setMenuOpen(true);
+  });
 
   return (
     <>
       <SwipeableRow onEdit={() => onEdit(entry)} onDelete={() => onDelete(entry.id)}>
         <div
           {...lp}
+          onClick={bulkSelectMode ? () => onToggleSelect(entry.id) : undefined}
           style={{
-            border: `1px solid ${COLORS.borderLight}`,
+            border: `1px solid ${isSelected ? COLORS.accent + '88' : (warnings?.length ? COLORS.warning + '55' : COLORS.borderLight)}`,
             borderRadius: 12,
             padding: '10px 12px',
-            background: COLORS.surfaceElevated,
-            transition: 'border-color 0.2s',
+            background: isSelected ? `${COLORS.accent}0d` : COLORS.surfaceElevated,
+            transition: 'border-color 0.2s, background 0.2s',
             userSelect: 'none',
+            cursor: bulkSelectMode ? 'pointer' : undefined,
           }}
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {bulkSelectMode && (
+                <span style={{ fontSize: 18, lineHeight: 1 }}>{isSelected ? '✅' : '⬜'}</span>
+              )}
               <strong>{formatDate(entry.date)}</strong>
               {entry.isFullTank ? (
                 <span style={{ fontSize: 10, color: COLORS.success, background: `${COLORS.success}22`, padding: '1px 6px', borderRadius: 6, fontWeight: 600 }}>FULL</span>
               ) : (
                 <span style={{ fontSize: 10, color: COLORS.warning, background: `${COLORS.warning}22`, padding: '1px 6px', borderRadius: 6, fontWeight: 600 }}>PARTIAL</span>
               )}
+              {/* Feature 16: integrity warning badge */}
+              {warnings?.length > 0 && (
+                <span
+                  title={warnings.join('\n')}
+                  style={{ fontSize: 10, color: COLORS.warning, background: `${COLORS.warning}22`, padding: '1px 6px', borderRadius: 6, fontWeight: 700, cursor: 'help' }}
+                >
+                  ⚠️
+                </span>
+              )}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-              <IconButton onClick={() => onEdit(entry)} title="Edit">✏️</IconButton>
-              <IconButton onClick={() => onDelete(entry.id)} title="Delete" variant="danger">🗑️</IconButton>
-            </div>
+            {!bulkSelectMode && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                <IconButton onClick={() => onEdit(entry)} title="Edit">✏️</IconButton>
+                <IconButton onClick={() => onDelete(entry.id)} title="Delete" variant="danger">🗑️</IconButton>
+              </div>
+            )}
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.textSecondary, fontSize: 13 }}>
             <span>{fmt(entry.liters, 2)} L · {fmt(entry.pricePerLiter, 2)} {currency}/L</span>
@@ -1212,7 +1236,8 @@ export default function App() {
   const [tabAnimDir, setTabAnimDir] = useState('right');
   const [theme, setTheme] = usePersistentState('fuelpilot_theme', 'dark');
   const [isHydrated, setIsHydrated] = useState(false);
-  const [consumptionTarget, setConsumptionTarget] = usePersistentState('fuelpilot_consumptionTarget', 0);
+  // Feature 4: per-vehicle consumption targets (map of vehicleId → target value)
+  const [vehicleConsumptionTargets, setVehicleConsumptionTargets] = usePersistentState('fuelpilot_vehicle_targets', {});
   const [consumptionTargetInput, setConsumptionTargetInput] = useState('');
   const [rangeFrom, setRangeFrom] = useState('');
   const [rangeTo, setRangeTo] = useState('');
@@ -1223,6 +1248,8 @@ export default function App() {
   const [historyCostMin, setHistoryCostMin] = useState('');
   const [historyCostMax, setHistoryCostMax] = useState('');
   const [historyFilterOpen, setHistoryFilterOpen] = useState(false);
+  // Feature 1: sort history
+  const [historySortBy, setHistorySortBy] = useState('newest');
   // Pagination state (feature 11)
   const [historyPage, setHistoryPage] = useState(1);
   const [vehicles, setVehicles] = usePersistentState('fuelpilot_vehicles', []);
@@ -1249,11 +1276,26 @@ export default function App() {
   const [monthlyBudget, setMonthlyBudget] = usePersistentState('fuelpilot_monthly_budget', 0);
   const [monthlyBudgetInput, setMonthlyBudgetInput] = useState('');
 
+  // Feature 5 (editable trip tags): custom tag list
+  const [customTripTags, setCustomTripTags] = usePersistentState('fuelpilot_trip_tags', DEFAULT_TRIP_TAGS);
+  const [newTagInput, setNewTagInput] = useState('');
+
   // Feature 28: history tag filter
   const [historyTagFilter, setHistoryTagFilter] = useState('');
 
   // Feature 5 (CSV import) error state
   const [importCSVError, setImportCSVError] = useState('');
+
+  // Feature 3: "Mark as done" confirmation modal with custom fields
+  const [markDoneItem, setMarkDoneItem] = useState(null);
+  const [markDoneForm, setMarkDoneForm] = useState({ date: todayIso(), odometer: '', cost: '' });
+
+  // Feature 17: bulk delete
+  const [bulkSelectMode, setBulkSelectMode] = useState(false);
+  const [bulkSelectedIds, setBulkSelectedIds] = useState(new Set());
+
+  // Feature 18: import merge strategy modal
+  const [pendingImportFile, setPendingImportFile] = useState(null);
 
   // Apply theme palette before render so all child components see correct colors
   useMemo(() => {
@@ -1335,18 +1377,32 @@ export default function App() {
     color: VEHICLE_COLORS[0],
   });
 
-  const [refuelForm, setRefuelForm] = useState({
-    date: todayIso(),
-    odometer: '',
-    liters: '',
-    pricePerLiter: '',
-    isFullTank: true,
-    station: '',
-    note: '',
-    photo: null,
-    fuelType: '',
-    tripTag: '',
+  // Feature 15: auto-save draft refuel form (photo excluded to avoid storage bloat)
+  const [refuelForm, setRefuelForm] = useState(() => {
+    try {
+      const saved = localStorage.getItem('fuelpilot_draft_refuel');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return { ...parsed, photo: null };
+      }
+    } catch { /* ignore */ }
+    return {
+      date: todayIso(),
+      odometer: '',
+      liters: '',
+      pricePerLiter: '',
+      isFullTank: true,
+      station: '',
+      note: '',
+      photo: null,
+      fuelType: '',
+      tripTag: '',
+    };
   });
+  useEffect(() => {
+    const { photo, ...rest } = refuelForm; // eslint-disable-line no-unused-vars
+    localStorage.setItem('fuelpilot_draft_refuel', JSON.stringify(rest));
+  }, [refuelForm]);
 
   const [maintForm, setMaintForm] = useState({
     type: 'oil_change',
@@ -1364,6 +1420,48 @@ export default function App() {
   useEffect(() => {
     setMaintForm((prev) => ({ ...prev, lastDoneOdometer: currentOdometer || 0 }));
   }, [selectedVehicleId]);
+
+  // Feature 12: pre-populate odometer with last known value when vehicle changes
+  useEffect(() => {
+    if (currentOdometer > 0) {
+      setRefuelForm((prev) => ({
+        ...prev,
+        odometer: prev.odometer || String(currentOdometer),
+      }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedVehicleId]);
+
+  // Feature 14: keyboard shortcuts
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
+      if (e.key === 'r' || e.key === 'R') handleTabChange('refuel');
+      else if (e.key === 's' || e.key === 'S') handleTabChange('stats');
+      else if (e.key === 'm' || e.key === 'M') handleTabChange('maintenance');
+      else if (e.key === ',') handleTabChange('settings');
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  });
+
+  // Feature 11: swipe-to-switch tabs
+  const swipeStartRef = useRef(null);
+  function handleContentTouchStart(e) {
+    swipeStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  }
+  function handleContentTouchEnd(e) {
+    if (!swipeStartRef.current) return;
+    const dx = e.changedTouches[0].clientX - swipeStartRef.current.x;
+    const dy = Math.abs(e.changedTouches[0].clientY - swipeStartRef.current.y);
+    swipeStartRef.current = null;
+    if (Math.abs(dx) > 60 && dy < 40) {
+      const tabKeys = TAB_ITEMS.map((t) => t.key);
+      const currentIdx = tabKeys.indexOf(activeTab);
+      if (dx < 0 && currentIdx < tabKeys.length - 1) handleTabChange(tabKeys[currentIdx + 1]);
+      else if (dx > 0 && currentIdx > 0) handleTabChange(tabKeys[currentIdx - 1]);
+    }
+  }
 
   /* ─── CRUD handlers ─── */
 
@@ -1442,11 +1540,15 @@ export default function App() {
     };
 
     setRefuels((prev) => [...prev, entry]);
+    // Feature 10: haptic feedback on save
+    try { navigator.vibrate?.(50); } catch { /* ignore */ }
+    // Feature 15: clear draft on successful save
+    localStorage.removeItem('fuelpilot_draft_refuel');
     setRefuelForm({
       date: todayIso(),
-      odometer: odometer,
+      odometer: String(odometer),
       liters: '',
-      pricePerLiter: pricePerLiter,
+      pricePerLiter: String(pricePerLiter),
       isFullTank: true,
       station: '',
       note: '',
@@ -1503,6 +1605,8 @@ export default function App() {
   function handleDeleteRefuel(id) {
     const entry = refuels.find((r) => r.id === id);
     if (!entry) return;
+    // Feature 10: haptic on delete
+    try { navigator.vibrate?.([40, 30, 40]); } catch { /* ignore */ }
     setRefuels((prev) => prev.filter((r) => r.id !== id));
     showUndoToast('Refuel deleted', () => setRefuels((prev) => [...prev, entry]));
   }
@@ -1590,24 +1694,42 @@ export default function App() {
   function handleDeleteMaint(id) {
     const item = maintenance.find((m) => m.id === id);
     if (!item) return;
+    try { navigator.vibrate?.([40, 30, 40]); } catch { /* ignore */ }
     setMaintenance((prev) => prev.filter((m) => m.id !== id));
     showUndoToast('Reminder deleted', () => setMaintenance((prev) => [...prev, item]));
   }
 
-  function markMaintenanceDone(item) {
-    const historyEntry = { date: todayIso(), odometer: currentOdometer || item.lastDoneOdometer, cost: item.cost || 0 };
+  // Feature 3: open "mark as done" modal with pre-filled values
+  function openMarkDone(item) {
+    setMarkDoneItem(item);
+    setMarkDoneForm({
+      date: todayIso(),
+      odometer: String(currentOdometer || item.lastDoneOdometer || ''),
+      cost: String(item.cost || ''),
+    });
+  }
+
+  function confirmMarkDone() {
+    if (!markDoneItem) return;
+    const doneDate = markDoneForm.date || todayIso();
+    const doneOdometer = num(markDoneForm.odometer) || currentOdometer || markDoneItem.lastDoneOdometer;
+    const doneCost = num(markDoneForm.cost);
+    const historyEntry = { date: doneDate, odometer: doneOdometer, cost: doneCost };
     setMaintenance((prev) =>
       prev.map((m) =>
-        m.id === item.id
+        m.id === markDoneItem.id
           ? {
               ...m,
-              lastDoneAt: todayIso(),
-              lastDoneOdometer: currentOdometer || m.lastDoneOdometer,
+              lastDoneAt: doneDate,
+              lastDoneOdometer: doneOdometer,
+              cost: doneCost || m.cost,
               history: [...(m.history || []), historyEntry],
             }
           : m
       )
     );
+    try { navigator.vibrate?.(50); } catch { /* ignore */ }
+    setMarkDoneItem(null);
   }
 
   // Feature 18: odometer tracker
@@ -1712,8 +1834,20 @@ export default function App() {
 
   const HISTORY_PAGE_SIZE = 10;
 
-  // Sorted newest-first history for the Refuel tab
-  const sortedHistory = useMemo(() => vehicleRefuels.slice().reverse(), [vehicleRefuels]);
+  // Feature 4: per-vehicle consumption target (falls back to 0)
+  const consumptionTarget = vehicleConsumptionTargets[selectedVehicleId] || 0;
+
+  // Feature 1: sorted history — apply sort after filters
+  const sortedHistory = useMemo(() => {
+    const base = vehicleRefuels.slice().reverse(); // newest-first baseline
+    if (historySortBy === 'newest') return base;
+    if (historySortBy === 'oldest') return vehicleRefuels.slice(); // oldest-first
+    if (historySortBy === 'cost_desc') return base.slice().sort((a, b) => b.totalCost - a.totalCost);
+    if (historySortBy === 'cost_asc') return base.slice().sort((a, b) => a.totalCost - b.totalCost);
+    if (historySortBy === 'liters_desc') return base.slice().sort((a, b) => b.liters - a.liters);
+    if (historySortBy === 'liters_asc') return base.slice().sort((a, b) => a.liters - b.liters);
+    return base;
+  }, [vehicleRefuels, historySortBy]);
 
   // Map from "odometer_date" → consumption value for full-tank entries (used in history rows)
   const consumptionByKey = useMemo(() => {
@@ -1810,6 +1944,53 @@ export default function App() {
     return Object.entries(map).sort((a, b) => b[1] - a[1]);
   }, [vehicleRefuels]);
 
+  // Feature 9: yearly comparison data
+  const yearlyData = useMemo(() => {
+    const map = new Map();
+    for (const r of vehicleRefuels) {
+      const year = r.date.slice(0, 4);
+      if (!map.has(year)) map.set(year, { cost: 0, liters: 0 });
+      const y = map.get(year);
+      y.cost += r.totalCost;
+      y.liters += r.liters;
+    }
+    return Array.from(map.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([year, data]) => ({ year, ...data }));
+  }, [vehicleRefuels]);
+
+  // Feature 8: cost-per-km trend (needs consumption series + matching price)
+  const costPerKmSeries = useMemo(() => {
+    return filteredStats.consumptionSeries.map((point) => {
+      const matchingEntry = filteredRefuels.find(
+        (r) => r.isFullTank && r.odometer === point.odometer && r.date === point.date
+      );
+      return matchingEntry ? { date: point.date, value: (point.value * matchingEntry.pricePerLiter) / 100 } : null;
+    }).filter(Boolean);
+  }, [filteredStats.consumptionSeries, filteredRefuels]);
+
+  // Feature 16: data integrity warnings per refuel entry
+  const refuelWarnings = useMemo(() => {
+    const warnings = new Map();
+    const avgPrice =
+      vehicleRefuels.length > 0
+        ? vehicleRefuels.reduce((s, r) => s + r.pricePerLiter, 0) / vehicleRefuels.length
+        : 0;
+    for (let i = 0; i < vehicleRefuels.length; i++) {
+      const r = vehicleRefuels[i];
+      const warns = [];
+      if (i > 0 && r.odometer <= vehicleRefuels[i - 1].odometer) {
+        warns.push('Odometer not increasing');
+      }
+      if (r.liters > 100) warns.push(`Large fill: ${r.liters.toFixed(1)} L`);
+      if (avgPrice > 0 && r.pricePerLiter > avgPrice * 3) {
+        warns.push(`Unusually high price (avg: ${fmt(avgPrice, 2)})`);
+      }
+      if (warns.length > 0) warnings.set(r.id, warns);
+    }
+    return warnings;
+  }, [vehicleRefuels]);
+
   function clearHistoryFilters() {
     setHistorySearch('');
     setHistoryDateFrom('');
@@ -1817,6 +1998,44 @@ export default function App() {
     setHistoryCostMin('');
     setHistoryCostMax('');
     setHistoryTagFilter('');
+  }
+
+  // Feature 13: share stats as text
+  function shareStats() {
+    if (!selectedVehicle) return;
+    const lines = [
+      `🚗 ${selectedVehicle.name} — FuelPilot Stats`,
+      `📊 Avg consumption: ${fmt(stats.avgConsumption)} l/100 km`,
+      `💰 Total cost: ${fmt(stats.totalCost, 0)} ${currency}`,
+      `🛣️ Total distance: ${fmt(stats.totalDistance, 0)} km`,
+      `⛽ Total fuel: ${fmt(stats.totalLiters, 0)} L`,
+      `📈 Avg cost/km: ${fmt(stats.avgCostPerKm, 3)} ${currency}/km`,
+    ];
+    if (stats.totalCo2 > 0) {
+      lines.push(`🌱 Est. CO₂: ${fmt(stats.totalCo2, 0)} kg`);
+    }
+    const text = lines.join('\n');
+    if (navigator.share) {
+      navigator.share({ title: 'FuelPilot Stats', text }).catch(() => {});
+    } else {
+      navigator.clipboard?.writeText(text).then(() =>
+        showUndoToast('Stats copied to clipboard', null)
+      );
+    }
+  }
+
+  // Feature 17: bulk delete handler
+  function handleBulkDelete() {
+    const ids = new Set(bulkSelectedIds);
+    const deleted = vehicleRefuels.filter((r) => ids.has(r.id));
+    setRefuels((prev) => prev.filter((r) => !ids.has(r.id)));
+    setBulkSelectedIds(new Set());
+    setBulkSelectMode(false);
+    try { navigator.vibrate?.([40, 30, 40]); } catch { /* ignore */ }
+    showUndoToast(
+      `Deleted ${deleted.length} refuel(s)`,
+      () => setRefuels((prev) => [...prev, ...deleted])
+    );
   }
 
   // Duplicate last refuel (feature 12)
@@ -1885,9 +2104,15 @@ export default function App() {
     URL.revokeObjectURL(url);
   }
 
+  // Feature 18: import JSON with strategy selection
   function importData(file) {
     if (!file) return;
+    // Show strategy modal instead of importing directly
+    setPendingImportFile(file);
+  }
 
+  function executeImport(file, strategy) {
+    if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
       try {
@@ -1898,15 +2123,40 @@ export default function App() {
           throw new Error('Invalid backup shape');
         }
 
-        setVehicles(parsed.vehicles);
-        setRefuels(parsed.refuels);
-        setMaintenance(parsed.maintenance);
-        if (Array.isArray(parsed.odometerReadings)) setOdometerReadings(parsed.odometerReadings);
+        if (strategy === 'merge') {
+          // Merge: keep existing data, append new records by ID
+          setVehicles((prev) => {
+            const existingIds = new Set(prev.map((v) => v.id));
+            return [...prev, ...parsed.vehicles.filter((v) => !existingIds.has(v.id))];
+          });
+          setRefuels((prev) => {
+            const existingIds = new Set(prev.map((r) => r.id));
+            return [...prev, ...parsed.refuels.filter((r) => !existingIds.has(r.id))];
+          });
+          setMaintenance((prev) => {
+            const existingIds = new Set(prev.map((m) => m.id));
+            return [...prev, ...parsed.maintenance.filter((m) => !existingIds.has(m.id))];
+          });
+          if (Array.isArray(parsed.odometerReadings)) {
+            setOdometerReadings((prev) => {
+              const existingIds = new Set(prev.map((r) => r.id));
+              return [...prev, ...parsed.odometerReadings.filter((r) => !existingIds.has(r.id))];
+            });
+          }
+          showUndoToast(`Merged ${parsed.refuels.length} refuels`, null);
+        } else {
+          // Replace all
+          setVehicles(parsed.vehicles);
+          setRefuels(parsed.refuels);
+          setMaintenance(parsed.maintenance);
+          if (Array.isArray(parsed.odometerReadings)) setOdometerReadings(parsed.odometerReadings);
 
-        if (parsed.selectedVehicleId) {
-          setSelectedVehicleId(parsed.selectedVehicleId);
-        } else if (parsed.vehicles.length) {
-          setSelectedVehicleId(parsed.vehicles[0].id);
+          if (parsed.selectedVehicleId) {
+            setSelectedVehicleId(parsed.selectedVehicleId);
+          } else if (parsed.vehicles.length) {
+            setSelectedVehicleId(parsed.vehicles[0].id);
+          }
+          showUndoToast('Backup imported', null);
         }
 
         setImportError('');
@@ -1914,7 +2164,6 @@ export default function App() {
         setImportError('Invalid JSON backup file.');
       }
     };
-
     reader.readAsText(file);
   }
 
@@ -2056,6 +2305,8 @@ export default function App() {
         </div>
       )}
       <div
+        onTouchStart={handleContentTouchStart}
+        onTouchEnd={handleContentTouchEnd}
         style={{
           maxWidth: 720,
           margin: '0 auto',
@@ -2433,7 +2684,7 @@ export default function App() {
                     onChange={(e) => setRefuelForm((prev) => ({ ...prev, tripTag: e.target.value }))}
                   >
                     <option value="">— none —</option>
-                    {TRIP_TAGS.map((t) => <option key={t} value={t}>{t}</option>)}
+                    {customTripTags.map((t) => <option key={t} value={t}>{t}</option>)}
                   </Select>
                 </div>
                 {/* Receipt photo (feature 14) */}
@@ -2469,14 +2720,24 @@ export default function App() {
               </form>
             </Card>
 
-            {/* Refuel history (feature 10 filter + feature 11 pagination) */}
+            {/* Refuel history (feature 10 filter + feature 11 pagination + feature 1 sort + feature 17 bulk-delete) */}
             <Card>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: historyFilterOpen ? 12 : 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: historyFilterOpen ? 12 : 6 }}>
                 <SectionTitle icon="📋" style={{ margin: 0 }}>Refuel history</SectionTitle>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   {historyFiltersActive && (
                     <Button type="button" variant="ghost" size="small" onClick={clearHistoryFilters}>✕ Clear</Button>
                   )}
+                  {/* Feature 17: bulk select toggle */}
+                  <Button
+                    type="button"
+                    variant={bulkSelectMode ? 'danger' : 'ghost'}
+                    size="small"
+                    onClick={() => { setBulkSelectMode((b) => !b); setBulkSelectedIds(new Set()); }}
+                    title="Select multiple for bulk delete"
+                  >
+                    {bulkSelectMode ? '✕ Cancel' : '☑'}
+                  </Button>
                   <Button
                     type="button"
                     variant={historyFilterOpen ? 'primary' : 'secondary'}
@@ -2486,6 +2747,23 @@ export default function App() {
                     🔍 Filter
                   </Button>
                 </div>
+              </div>
+
+              {/* Feature 1: sort selector */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <span style={{ fontSize: 12, color: COLORS.textSecondary, whiteSpace: 'nowrap' }}>Sort:</span>
+                <select
+                  value={historySortBy}
+                  onChange={(e) => setHistorySortBy(e.target.value)}
+                  style={{ fontSize: 12, background: COLORS.surfaceElevated, color: COLORS.textPrimary, border: `1px solid ${COLORS.border}`, borderRadius: 8, padding: '4px 8px', outline: 'none', cursor: 'pointer' }}
+                >
+                  <option value="newest">Newest first</option>
+                  <option value="oldest">Oldest first</option>
+                  <option value="cost_desc">Highest cost</option>
+                  <option value="cost_asc">Lowest cost</option>
+                  <option value="liters_desc">Most liters</option>
+                  <option value="liters_asc">Fewest liters</option>
+                </select>
               </div>
 
               {historyFilterOpen && (
@@ -2518,12 +2796,12 @@ export default function App() {
                       <Input type="number" step="0.01" placeholder="∞" value={historyCostMax} onChange={(e) => setHistoryCostMax(e.target.value)} />
                     </div>
                   </div>
-                  {/* Feature 28: filter by trip tag */}
+                  {/* Feature 28 / Feature 5: filter by trip tag */}
                   <div>
                     <Label>Trip tag</Label>
                     <Select value={historyTagFilter} onChange={(e) => setHistoryTagFilter(e.target.value)}>
                       <option value="">All tags</option>
-                      {TRIP_TAGS.map((t) => <option key={t} value={t}>{t}</option>)}
+                      {customTripTags.map((t) => <option key={t} value={t}>{t}</option>)}
                     </Select>
                   </div>
                   {historyFiltersActive && (
@@ -2547,9 +2825,40 @@ export default function App() {
                       consumption={consumptionByKey.get(`${entry.odometer}_${entry.date}`) ?? null}
                       onEdit={openEditRefuel}
                       onDelete={handleDeleteRefuel}
+                      warnings={refuelWarnings.get(entry.id)}
+                      bulkSelectMode={bulkSelectMode}
+                      isSelected={bulkSelectedIds.has(entry.id)}
+                      onToggleSelect={(id) => setBulkSelectedIds((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(id)) next.delete(id); else next.add(id);
+                        return next;
+                      })}
                     />
                   ))}
               </div>
+              {/* Feature 17: bulk delete action bar */}
+              {bulkSelectMode && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 10, padding: '10px 0 4px', borderTop: `1px solid ${COLORS.border}` }}>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="small"
+                    onClick={() => setBulkSelectedIds(new Set(pagedHistory.map((r) => r.id)))}
+                  >
+                    Select all
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="danger"
+                    size="small"
+                    disabled={bulkSelectedIds.size === 0}
+                    onClick={handleBulkDelete}
+                    style={{ flex: 1 }}
+                  >
+                    🗑️ Delete {bulkSelectedIds.size > 0 ? `${bulkSelectedIds.size} selected` : 'selected'}
+                  </Button>
+                </div>
+              )}
               {hasMoreHistory && (
                 <Button
                   type="button"
@@ -2634,6 +2943,41 @@ export default function App() {
               <StatBox label="Distance" value={`${fmt(filteredStats.totalDistance, 0)} km`} icon="🛣️" accent={COLORS.success} />
             </div>
 
+            {/* Feature 13: share stats button */}
+            {stats.refuelCount > 0 && (
+              <Button type="button" variant="secondary" onClick={shareStats} style={{ width: '100%' }}>
+                📤 Share stats
+              </Button>
+            )}
+
+            {/* Feature 6: all-time lifetime summary panel */}
+            {stats.refuelCount > 1 && (
+              <Card style={{ background: `linear-gradient(135deg, ${COLORS.accent}12, ${COLORS.success}08)`, border: `1px solid ${COLORS.accent}22` }}>
+                <SectionTitle icon="🏁">All-time lifetime stats</SectionTitle>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                  <StatBox label="Total km driven" value={`${fmt(stats.totalDistance, 0)} km`} icon="🛣️" accent={COLORS.accent} />
+                  <StatBox label="Total cost" value={`${fmt(stats.totalCost, 0)} ${currency}`} icon="💰" accent={COLORS.warning} />
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <StatBox label="Total fuel" value={`${fmt(stats.totalLiters, 0)} L`} icon="⛽" accent={COLORS.accentLight} />
+                  {/* Feature 7: CO₂ summary */}
+                  <StatBox
+                    label="Est. CO₂"
+                    value={stats.totalCo2 > 0 ? `${fmt(stats.totalCo2, 0)} kg` : '-'}
+                    icon="🌱"
+                    accent={COLORS.success}
+                    sub={stats.totalCo2 > 0 ? `≈ ${fmt(stats.totalCo2 / 1000, 2)} t` : undefined}
+                  />
+                </div>
+                {stats.firstEntry && stats.lastEntry && (
+                  <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${COLORS.borderLight}` }}>
+                    From {formatDate(stats.firstEntry.date)} to {formatDate(stats.lastEntry.date)}
+                    {' '}· {stats.refuelCount} fill-ups
+                  </div>
+                )}
+              </Card>
+            )}
+
             {/* ── Fuel Insights card ── */}
             {filteredStats.consumptionSeries.length > 0 && (
               <Card>
@@ -2666,6 +3010,20 @@ export default function App() {
                     accent={COLORS.accent}
                   />
                 </div>
+                {/* Feature 7: CO₂ per filtered period */}
+                {filteredStats.totalCo2 > 0 && (
+                  <div style={{ marginTop: 10, background: `${COLORS.success}0d`, border: `1px solid ${COLORS.success}22`, borderRadius: 10, padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{ fontSize: 20 }}>🌱</span>
+                    <div>
+                      <span style={{ fontSize: 13, color: COLORS.success, fontWeight: 700 }}>
+                        Est. CO₂: {fmt(filteredStats.totalCo2, 0)} kg
+                      </span>
+                      <span style={{ fontSize: 12, color: COLORS.textMuted, marginLeft: 8 }}>
+                        ({fmt(filteredStats.totalCo2 / Math.max(1, filteredStats.totalLiters), 2)} kg/L avg)
+                      </span>
+                    </div>
+                  </div>
+                )}
               </Card>
             )}
 
@@ -2796,6 +3154,43 @@ export default function App() {
               unit="km"
             />
 
+            {/* Feature 8: cost-per-km trend chart */}
+            {costPerKmSeries.length >= 2 && (
+              <ChartCard
+                key={`cost-per-km-${theme}`}
+                title={`Cost per km (${currency}/km)`}
+                labels={costPerKmSeries.map((x) => x.date.slice(5))}
+                values={costPerKmSeries.map((x) => Number(fmt(x.value, 3)))}
+                type="line"
+                color={COLORS.warning}
+                unit={`${currency}/km`}
+              />
+            )}
+
+            {/* Feature 9: yearly comparison bar chart */}
+            {yearlyData.length >= 2 && (
+              <>
+                <ChartCard
+                  key={`yearly-cost-${theme}`}
+                  title="Cost by year"
+                  labels={yearlyData.map((y) => y.year)}
+                  values={yearlyData.map((y) => Number(fmt(y.cost, 0)))}
+                  type="bar"
+                  color={COLORS.accent}
+                  unit={currency}
+                />
+                <ChartCard
+                  key={`yearly-liters-${theme}`}
+                  title="Fuel by year (L)"
+                  labels={yearlyData.map((y) => y.year)}
+                  values={yearlyData.map((y) => Number(fmt(y.liters, 0)))}
+                  type="bar"
+                  color={COLORS.accentLight}
+                  unit="L"
+                />
+              </>
+            )}
+
             {/* Feature 28: cost by trip tag breakdown */}
             {costByTag.length > 0 && (
               <Card>
@@ -2816,6 +3211,60 @@ export default function App() {
         {/* ═══ MAINTENANCE TAB ═══ */}
         {selectedVehicle && activeTab === 'maintenance' && (
           <div className={`fp-tab-enter-${tabAnimDir}`} style={{ display: 'grid', gap: 14 }}>
+
+            {/* Feature 2: Quick stats summary banner */}
+            {vehicleMaintenance.length > 0 && (() => {
+              const allStatuses = vehicleMaintenance.map((item) => getMaintenanceStatus(item, currentOdometer));
+              const dueCount = allStatuses.filter((s) => s.key === 'due').length;
+              const soonCount = allStatuses.filter((s) => s.key === 'soon').length;
+              // Find next upcoming item by days
+              const upcoming = vehicleMaintenance
+                .map((item) => {
+                  if (!item.intervalDays) return null;
+                  const dueDate = new Date(item.lastDoneAt);
+                  dueDate.setDate(dueDate.getDate() + item.intervalDays);
+                  const daysLeft = Math.ceil((dueDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+                  const kmLeft = item.intervalKm > 0 ? (item.lastDoneOdometer + item.intervalKm) - currentOdometer : null;
+                  return { item, daysLeft, kmLeft };
+                })
+                .filter(Boolean)
+                .filter((x) => x.daysLeft > 0)
+                .sort((a, b) => a.daysLeft - b.daysLeft)[0];
+              return (
+                <div style={{
+                  background: dueCount > 0 ? `${COLORS.danger}18` : `${COLORS.accent}10`,
+                  border: `1px solid ${dueCount > 0 ? `${COLORS.danger}44` : `${COLORS.accent}33`}`,
+                  borderRadius: 12,
+                  padding: '12px 14px',
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr 1fr',
+                  gap: 10,
+                  textAlign: 'center',
+                }}>
+                  <div>
+                    <div style={{ fontSize: 18, fontWeight: 800, color: dueCount > 0 ? COLORS.danger : COLORS.success }}>
+                      {dueCount}
+                    </div>
+                    <div style={{ fontSize: 11, color: COLORS.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Overdue</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 18, fontWeight: 800, color: soonCount > 0 ? COLORS.warning : COLORS.textMuted }}>
+                      {soonCount}
+                    </div>
+                    <div style={{ fontSize: 11, color: COLORS.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>Due soon</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 15, fontWeight: 800, color: COLORS.accent }}>
+                      {upcoming ? `${upcoming.daysLeft}d` : '—'}
+                    </div>
+                    <div style={{ fontSize: 11, color: COLORS.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                      {upcoming ? `Next: ${upcoming.item.label.slice(0, 10)}` : 'All clear'}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
             <Card>
               <SectionTitle icon="🔔">Maintenance reminders</SectionTitle>
               {!vehicleMaintenance.length && <EmptyState icon="🔧" message="No maintenance reminders yet. Add one below!" />}
@@ -2858,14 +3307,14 @@ export default function App() {
                           </div>
                         </details>
                       )}
-                      {status.key === 'due' && (
+                      {(status.key === 'due' || status.key === 'soon') && (
                         <Button
                           variant="success"
                           size="small"
                           style={{ marginTop: 8, width: '100%' }}
-                          onClick={() => markMaintenanceDone(item)}
+                          onClick={() => openMarkDone(item)}
                         >
-                          ✓ Mark as done today
+                          ✓ Mark as done…
                         </Button>
                       )}
                     </div>
@@ -3053,9 +3502,10 @@ export default function App() {
             </Card>
 
             <Card>
+              {/* Feature 4: per-vehicle consumption target */}
               <SectionTitle icon="🎯">Consumption target</SectionTitle>
               <div style={{ color: COLORS.textSecondary, fontSize: 13, marginBottom: 10 }}>
-                Set a target L/100 km — a dashed reference line will appear on the consumption chart.
+                Set a target L/100 km for <strong style={{ color: COLORS.textPrimary }}>{selectedVehicle.name}</strong> — a dashed reference line appears on the chart.
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
                 <Input
@@ -3070,7 +3520,10 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     const v = num(consumptionTargetInput);
-                    setConsumptionTarget(v > 0 ? v : 0);
+                    setVehicleConsumptionTargets((prev) => ({
+                      ...prev,
+                      [selectedVehicleId]: v > 0 ? v : 0,
+                    }));
                     setConsumptionTargetInput('');
                   }}
                 >
@@ -3086,11 +3539,67 @@ export default function App() {
                     type="button"
                     variant="ghost"
                     size="small"
-                    onClick={() => setConsumptionTarget(0)}
+                    onClick={() => setVehicleConsumptionTargets((prev) => ({ ...prev, [selectedVehicleId]: 0 }))}
                   >
                     ✕ Remove
                   </Button>
                 </div>
+              )}
+            </Card>
+
+            {/* Feature 5: Editable trip tags */}
+            <Card>
+              <SectionTitle icon="🏷️">Trip tags</SectionTitle>
+              <div style={{ color: COLORS.textSecondary, fontSize: 13, marginBottom: 10 }}>
+                Manage the trip tag list used when logging refuels.
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                <Input
+                  placeholder="New tag name…"
+                  value={newTagInput}
+                  onChange={(e) => setNewTagInput(e.target.value)}
+                  style={{ flex: 1 }}
+                />
+                <Button
+                  type="button"
+                  onClick={() => {
+                    const tag = newTagInput.trim();
+                    if (tag && !customTripTags.includes(tag)) {
+                      setCustomTripTags((prev) => [...prev, tag]);
+                    }
+                    setNewTagInput('');
+                  }}
+                >
+                  + Add
+                </Button>
+              </div>
+              <div style={{ display: 'grid', gap: 6 }}>
+                {customTripTags.map((tag) => (
+                  <div key={tag} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: COLORS.surfaceElevated, borderRadius: 8, padding: '8px 12px' }}>
+                    <span style={{ fontSize: 13, color: COLORS.accentLight }}>🏷 {tag}</span>
+                    <IconButton
+                      variant="danger"
+                      title="Remove tag"
+                      onClick={() => setCustomTripTags((prev) => prev.filter((t) => t !== tag))}
+                    >
+                      🗑️
+                    </IconButton>
+                  </div>
+                ))}
+                {customTripTags.length === 0 && (
+                  <div style={{ fontSize: 12, color: COLORS.textMuted }}>No tags. Add one above.</div>
+                )}
+              </div>
+              {customTripTags.join(',') !== DEFAULT_TRIP_TAGS.join(',') && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="small"
+                  onClick={() => setCustomTripTags(DEFAULT_TRIP_TAGS)}
+                  style={{ marginTop: 8 }}
+                >
+                  ↺ Reset to defaults
+                </Button>
               )}
             </Card>
 
@@ -3149,10 +3658,13 @@ export default function App() {
                 💾 Save backup to device storage
               </Button>
               <Label>Import backup (JSON)</Label>
+              <div style={{ fontSize: 12, color: COLORS.textMuted, marginBottom: 6 }}>
+                You can choose to <strong>replace all</strong> data or <strong>merge</strong> (append new records) after selecting the file.
+              </div>
               <Input
                 type="file"
                 accept="application/json"
-                onChange={(e) => importData(e.target.files?.[0])}
+                onChange={(e) => { setImportError(''); importData(e.target.files?.[0]); e.target.value = ''; }}
               />
               {importError && <div style={{ color: COLORS.danger, marginTop: 6, fontSize: 13 }}>{importError}</div>}
               {/* Feature 5: Fuelio CSV import */}
@@ -3493,7 +4005,7 @@ export default function App() {
                 onChange={(e) => setEditRefuelForm((prev) => ({ ...prev, tripTag: e.target.value }))}
               >
                 <option value="">— none —</option>
-                {TRIP_TAGS.map((t) => <option key={t} value={t}>{t}</option>)}
+                {customTripTags.map((t) => <option key={t} value={t}>{t}</option>)}
               </Select>
             </div>
             {/* Receipt photo in edit modal (feature 14) */}
@@ -3578,6 +4090,101 @@ export default function App() {
             <Button onClick={saveEditMaint} style={{ width: '100%', marginTop: 4 }}>Save changes</Button>
           </div>
         )}
+      </Modal>
+
+      {/* Feature 3: Mark as Done modal */}
+      <Modal
+        open={Boolean(markDoneItem)}
+        title="Mark as Done"
+        onClose={() => setMarkDoneItem(null)}
+      >
+        {markDoneItem && (
+          <div style={{ display: 'grid', gap: 10 }}>
+            <div style={{ fontSize: 14, color: COLORS.textSecondary, marginBottom: 4 }}>
+              Recording completion of <strong style={{ color: COLORS.textPrimary }}>{markDoneItem.label}</strong>
+            </div>
+            <div>
+              <Label>Date done</Label>
+              <Input
+                type="date"
+                value={markDoneForm.date}
+                onChange={(e) => setMarkDoneForm((prev) => ({ ...prev, date: e.target.value }))}
+              />
+            </div>
+            <div>
+              <Label>Odometer (km)</Label>
+              <Input
+                type="number"
+                value={markDoneForm.odometer}
+                onChange={(e) => setMarkDoneForm((prev) => ({ ...prev, odometer: e.target.value }))}
+                placeholder={String(currentOdometer || markDoneItem.lastDoneOdometer || '')}
+              />
+            </div>
+            <div>
+              <Label>Cost ({currency})</Label>
+              <Input
+                type="number"
+                step="0.01"
+                value={markDoneForm.cost}
+                onChange={(e) => setMarkDoneForm((prev) => ({ ...prev, cost: e.target.value }))}
+                placeholder="0"
+              />
+            </div>
+            <Button onClick={confirmMarkDone} style={{ width: '100%', marginTop: 4 }}>✓ Confirm done</Button>
+          </div>
+        )}
+      </Modal>
+
+      {/* Feature 18: Import merge strategy modal */}
+      <Modal
+        open={Boolean(pendingImportFile)}
+        title="Import backup"
+        onClose={() => setPendingImportFile(null)}
+      >
+        <div style={{ display: 'grid', gap: 12 }}>
+          <div style={{ fontSize: 14, color: COLORS.textSecondary }}>
+            How should the imported data be combined with your existing data?
+          </div>
+          <div style={{ display: 'grid', gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => { executeImport(pendingImportFile, 'replace'); setPendingImportFile(null); }}
+              style={{
+                background: `${COLORS.danger}18`,
+                border: `1px solid ${COLORS.danger}44`,
+                borderRadius: 10,
+                padding: '12px 14px',
+                cursor: 'pointer',
+                textAlign: 'left',
+                color: COLORS.textPrimary,
+              }}
+            >
+              <div style={{ fontWeight: 700, color: COLORS.danger, marginBottom: 4 }}>🗑️ Replace all</div>
+              <div style={{ fontSize: 12, color: COLORS.textMuted }}>
+                Delete all current data and replace with the backup. Cannot be undone.
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => { executeImport(pendingImportFile, 'merge'); setPendingImportFile(null); }}
+              style={{
+                background: `${COLORS.success}18`,
+                border: `1px solid ${COLORS.success}44`,
+                borderRadius: 10,
+                padding: '12px 14px',
+                cursor: 'pointer',
+                textAlign: 'left',
+                color: COLORS.textPrimary,
+              }}
+            >
+              <div style={{ fontWeight: 700, color: COLORS.success, marginBottom: 4 }}>🔀 Merge append</div>
+              <div style={{ fontSize: 12, color: COLORS.textMuted }}>
+                Keep existing data and add new records from the backup (deduplicates by ID).
+              </div>
+            </button>
+          </div>
+          <Button type="button" variant="ghost" onClick={() => setPendingImportFile(null)}>Cancel</Button>
+        </div>
       </Modal>
 
       {/* Delete Vehicle Confirm */}
