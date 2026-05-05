@@ -69,7 +69,7 @@ const FUEL_LABELS = { diesel: 'Diesel', petrol: 'Petrol', lpg: 'LPG', ev: 'EV' }
 // Feature 28: trip / purpose tags (default list — overridable via settings)
 const DEFAULT_TRIP_TAGS = ['Commute', 'Road Trip', 'Work', 'Personal'];
 
-// Feature 7 (CO₂): kg CO₂ emitted per litre of fuel
+// Feature 7 (CO₂): kg CO₂ emitted per litre of fuel (petrol used as default for unknown fuel types)
 const CO2_FACTORS = { diesel: 2.68, petrol: 2.31, lpg: 1.51, ev: 0 };
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
@@ -1400,7 +1400,8 @@ export default function App() {
     };
   });
   useEffect(() => {
-    const { photo, ...rest } = refuelForm; // eslint-disable-line no-unused-vars
+    // eslint-disable-next-line no-unused-vars
+    const { photo: _photo, ...rest } = refuelForm;
     localStorage.setItem('fuelpilot_draft_refuel', JSON.stringify(rest));
   }, [refuelForm]);
 
@@ -1541,7 +1542,7 @@ export default function App() {
 
     setRefuels((prev) => [...prev, entry]);
     // Feature 10: haptic feedback on save
-    try { navigator.vibrate?.(50); } catch { /* ignore */ }
+    navigator.vibrate?.(50);
     // Feature 15: clear draft on successful save
     localStorage.removeItem('fuelpilot_draft_refuel');
     setRefuelForm({
@@ -1606,7 +1607,7 @@ export default function App() {
     const entry = refuels.find((r) => r.id === id);
     if (!entry) return;
     // Feature 10: haptic on delete
-    try { navigator.vibrate?.([40, 30, 40]); } catch { /* ignore */ }
+    navigator.vibrate?.([40, 30, 40]);
     setRefuels((prev) => prev.filter((r) => r.id !== id));
     showUndoToast('Refuel deleted', () => setRefuels((prev) => [...prev, entry]));
   }
@@ -1694,7 +1695,7 @@ export default function App() {
   function handleDeleteMaint(id) {
     const item = maintenance.find((m) => m.id === id);
     if (!item) return;
-    try { navigator.vibrate?.([40, 30, 40]); } catch { /* ignore */ }
+    navigator.vibrate?.([40, 30, 40]);
     setMaintenance((prev) => prev.filter((m) => m.id !== id));
     showUndoToast('Reminder deleted', () => setMaintenance((prev) => [...prev, item]));
   }
@@ -1728,7 +1729,7 @@ export default function App() {
           : m
       )
     );
-    try { navigator.vibrate?.(50); } catch { /* ignore */ }
+    navigator.vibrate?.(50);
     setMarkDoneItem(null);
   }
 
@@ -2031,7 +2032,7 @@ export default function App() {
     setRefuels((prev) => prev.filter((r) => !ids.has(r.id)));
     setBulkSelectedIds(new Set());
     setBulkSelectMode(false);
-    try { navigator.vibrate?.([40, 30, 40]); } catch { /* ignore */ }
+    navigator.vibrate?.([40, 30, 40]);
     showUndoToast(
       `Deleted ${deleted.length} refuel(s)`,
       () => setRefuels((prev) => [...prev, ...deleted])
@@ -3314,7 +3315,7 @@ export default function App() {
                           style={{ marginTop: 8, width: '100%' }}
                           onClick={() => openMarkDone(item)}
                         >
-                          ✓ Mark as done…
+                          ✓ Mark as done today…
                         </Button>
                       )}
                     </div>
