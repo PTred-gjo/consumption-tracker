@@ -381,7 +381,7 @@ function parseFuelioCSV(text) {
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
   if (!lines.length) throw new Error('Empty file');
 
-  // Locate header row (must contain date + odometer keywords)
+  // Locate header row (must contain a date column and either an odometer or fuel-quantity column)
   let headerIdx = -1;
   let cols = {};
   for (let i = 0; i < Math.min(6, lines.length); i++) {
@@ -1925,30 +1925,41 @@ export default function App() {
     reader.onload = () => {
       try {
         const { vehicles: csvVehicles, refuels: csvRefuels } = parseFuelioCSV(String(reader.result || ''));
-        // Merge: add new vehicles, append refuels (avoid duplicate IDs)
-        setVehicles((prev) => {
-          const existingNames = new Set(prev.map((v) => v.name.toLowerCase()));
-          const newVehicles = csvVehicles.filter((v) => !existingNames.has(v.name.toLowerCase()));
-          // Remap vehicleId references in csvRefuels for existing vehicles by name
-          const nameToId = {};
-          prev.forEach((v) => { nameToId[v.name.toLowerCase()] = v.id; });
-          csvVehicles.forEach((v) => { if (!nameToId[v.name.toLowerCase()]) nameToId[v.name.toLowerCase()] = v.id; });
-          // Store the map for refuels
-          reader._vehicleNameToId = nameToId;
-          return [...prev, ...newVehicles];
-        });
+
+        // Snapshot current vehicles to build name → final-ID mapping synchronously
+        const currentVehicles = vehicles;
+        const csvIdToFinalId = {};
+        const newVehicles = [];
+
+        for (const csvVeh of csvVehicles) {
+          const existing = currentVehicles.find((v) => v.name.toLowerCase() === csvVeh.name.toLowerCase());
+          if (existing) {
+            csvIdToFinalId[csvVeh.id] = existing.id;
+          } else {
+            csvIdToFinalId[csvVeh.id] = csvVeh.id;
+            newVehicles.push(csvVeh);
+          }
+        }
+
+        // Remap vehicleIds in refuel entries and assign fresh unique IDs
+        const remappedRefuels = csvRefuels.map((r) => ({
+          ...r,
+          id: uid('r'),
+          vehicleId: csvIdToFinalId[r.vehicleId] || r.vehicleId,
+        }));
+
+        setVehicles((prev) => [...prev, ...newVehicles]);
         setRefuels((prev) => {
           const existingIds = new Set(prev.map((r) => r.id));
-          // Re-map vehicleIds from CSV to existing vehicles by name match
-          const updatedRefuels = csvRefuels.map((r) => {
-            const csvVeh = csvVehicles.find((v) => v.id === r.vehicleId);
-            return { ...r, id: r.id + '_imp' + Date.now(), vehicleId: r.vehicleId };
-          }).filter((r) => !existingIds.has(r.id));
-          return [...prev, ...updatedRefuels];
+          return [...prev, ...remappedRefuels.filter((r) => !existingIds.has(r.id))];
         });
-        if (csvVehicles.length > 0) setSelectedVehicleId(csvVehicles[0].id);
+
+        if (csvVehicles.length > 0) {
+          setSelectedVehicleId(csvIdToFinalId[csvVehicles[0].id] || csvVehicles[0].id);
+        }
+
         setImportCSVError('');
-        showUndoToast(`Imported ${csvRefuels.length} refuels from CSV`, null);
+        showUndoToast(`Imported ${remappedRefuels.length} refuels from CSV`, null);
       } catch (err) {
         setImportCSVError(`CSV import error: ${err.message}`);
       }
@@ -3249,7 +3260,7 @@ export default function App() {
                 </Button>
               </div>
               <div style={{ fontSize: 13, color: COLORS.textSecondary }}>
-                Warn when estimated range &lt; <strong style={{ color: COLORS.textPrimary }}>{lowFuelThresholdKm} km</strong>
+                Warn when estimated range {'<'} <strong style={{ color: COLORS.textPrimary }}>{lowFuelThresholdKm} km</strong>
               </div>
               {estimatedRemainingRange !== null && (
                 <div style={{ marginTop: 8, fontSize: 12, color: estimatedRemainingRange < lowFuelThresholdKm ? COLORS.danger : COLORS.success }}>
