@@ -1,0 +1,37 @@
+{
+  "name": "FuelPilot",
+  "short_name": "FuelPilot",
+  "description": "Smart fuel tracker – real costs per kilometre",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0A0A0A",
+  "theme_color": "#3B82F6",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Log refuel",
+      "short_name": "Refuel",
+      "description": "Quickly log a new fill-up",
+      "url": "/?tab=refuel",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "View stats",
+      "short_name": "Stats",
+      "description": "Open fuel statistics",
+      "url": "/?tab=stats",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}
