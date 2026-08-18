@@ -23,8 +23,8 @@ module.exports = {
   },
   overrides: [
     {
-      // Build-time CLI scripts report progress on stdout.
-      files: ['scripts/**'],
+      // CLI scripts and the e2e runner report progress on stdout.
+      files: ['scripts/**', 'tests/**'],
       rules: { 'no-console': 'off' },
     },
     {

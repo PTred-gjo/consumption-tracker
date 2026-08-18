@@ -49,6 +49,22 @@ jobs:
           done
           echo "All required PWA assets present."
 
+      - name: Install Chromium for the smoke test
+        run: npx playwright install --with-deps chromium
+
+      - name: End-to-end smoke test
+        # Drives the production build in a real browser: onboarding, logging a
+        # refuel, the computed consumption figure, every tab, and persistence.
+        run: |
+          set -euo pipefail
+          npm run preview &
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null http://localhost:4173/; then break; fi
+            if [ "$i" -eq 30 ]; then echo "::error::preview server never came up"; exit 1; fi
+            sleep 2
+          done
+          npm run test:e2e
+
       - name: Upload web build
         uses: actions/upload-artifact@v4
         with:

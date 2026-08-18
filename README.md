@@ -14,13 +14,14 @@ A smart fuel consumption tracker that turns raw refuel data into clear insights 
 - **🌗 Light / Dark Theme** — Toggle between dark and light modes, persisted across sessions
 - **🏷️ Trip Tags** — Tag each refuel (Commute, Road Trip, Work, etc.) and see cost breakdown per tag
 - **🌱 CO₂ Tracking** — Estimated CO₂ emissions per fill-up and lifetime total
-- **📷 Receipt Photos** — Attach a photo of the receipt to any refuel entry
+- **📷 Receipt Photos** — Attach a receipt image to any refuel entry (compressed automatically)
 - **💾 Backup & Restore** — Export/import JSON, CSV export, Fuelio CSV import, device storage backup
 - **🔔 Push Notifications** — Schedule local reminders before maintenance is due (Capacitor)
 - **📅 Monthly Budget** — Set a spending limit and track progress with a live progress bar
 - **⚠️ Smart Warnings** — Low-range alert, overdue-refuel reminder, data integrity flags
 - **🔍 History Search** — Filter refuel history by date, cost range, station, note, or trip tag
-- **📲 PWA Shortcuts** — Installable from browser; home-screen shortcuts jump directly to Refuel or Stats
+- **📲 Installable PWA** — Install from the browser and use it fully offline; home-screen shortcuts jump straight to Refuel or Stats
+- **🔒 Private by design** — No account, no server, no analytics; nothing ever leaves your device
 
 ## How It Works
 
@@ -32,34 +33,54 @@ A smart fuel consumption tracker that turns raw refuel data into clear insights 
 
 ## Calculation Logic
 
+Implemented in [`src/lib/stats.js`](src/lib/stats.js) and
+[`src/lib/maintenance.js`](src/lib/maintenance.js), both covered by unit tests.
+
 ### Fuel Consumption (l/100 km)
 
-Between two consecutive **full tank** entries:
+Measured between two **full tank** entries, where the fuel burnt over the
+interval is known exactly. Partial fills in between are accumulated:
 
 ```
-consumption = (liters / (currentOdometer - previousOdometer)) × 100
-```
-
-For partial fillups, liters are accumulated until the next full tank:
-
-```
-totalLiters = sum of all partial fills + current full fill
+totalLiters   = partial fills since the last full tank + this full fill
 totalDistance = currentOdometer - lastFullTankOdometer
-consumption = (totalLiters / totalDistance) × 100
+consumption   = (totalLiters / totalDistance) × 100
+```
+
+The first full tank only establishes the baseline and produces no reading.
+
+**If you never brim the tank**, a rolling 3-fill window is used instead: the
+litres of fills *i-1* and *i* spread over the distance from fill *i-2* to *i*.
+Results from this path are marked with an asterisk in the app, because they are
+an estimate rather than a measurement.
+
+### Average Consumption
+
+Weighted by distance, not a plain mean of the individual readings, so a long
+interval counts for more than a short one:
+
+```
+avgConsumption = (Σ liters / Σ distance) × 100
 ```
 
 ### Cost per Kilometer
 
+The first refuel is excluded: it replaced fuel burnt *before* the tracked
+distance began, so charging it against that distance would overstate the cost.
+
 ```
-costPerKm = totalCost / (currentOdometer - previousOdometer)
+costPerKm = (totalCost - firstRefuelCost) / (lastOdometer - firstOdometer)
 ```
 
 ### Maintenance Due
 
 ```
-isDue = (today >= lastDoneDate + intervalDays) OR (currentOdometer >= lastDoneOdometer + intervalKm)
-isUpcoming = within 30 days OR within 1000 km
+isDue      = today >= lastDoneDate + intervalDays  OR  odometer >= lastDoneOdometer + intervalKm
+isUpcoming = within 30 days                        OR  within 1000 km
 ```
+
+Dates are parsed as local midnight throughout, so a reminder falls on the same
+calendar day regardless of time zone.
 
 ## Getting Started
 
@@ -90,42 +111,101 @@ npm run dev
 ### Building for Android
 
 ```bash
-# Build the web app
-npm run build
+# Build the web app and copy it into the native project
+npm run build:android
 
-# Add Android platform
-npx cap add android
-
-# Sync web assets to native project
-npx cap sync android
-
-# Build debug APK
+# Debug APK
 cd android && ./gradlew assembleDebug
 ```
 
-The debug APK will be at `android/app/build/outputs/apk/debug/app-debug.apk`.
+The debug APK lands at `android/app/build/outputs/apk/debug/app-debug.apk`.
 
-A GitHub Actions workflow (`.github/workflows/build-apk.yml`) builds the APK automatically on every push to `main`.
+For signed release builds and the Play Store submission, see
+**[docs/PUBLISHING.md](docs/PUBLISHING.md)**.
+
+```bash
+npm run android:bundle   # signed .aab for Google Play
+npm run android:apk      # signed .apk for sideloading
+```
+
+Release signing reads `android/keystore.properties` or the `FUELPILOT_KEYSTORE_*`
+environment variables. Neither is committed — see the publishing guide.
+
+## Quality Checks
+
+```bash
+npm run lint      # ESLint
+npm test          # Vitest unit tests
+npm run check     # lint + tests + build, same as CI
+
+# End-to-end smoke test against the production build
+npm run build
+npm run preview &
+npm run test:e2e
+```
+
+The calculation-heavy parts of the app — consumption maths, CSV import, backup
+validation, maintenance scheduling and the storage layer — live in `src/lib/`
+as pure modules with unit tests. Run `npm test` before opening a PR.
+
+`tests/smoke.mjs` drives the built app in a real browser to cover what unit
+tests cannot: that it mounts, that a refuel entered through the form yields the
+right consumption figure, that every tab renders, and that data survives a
+reload.
+
+Two GitHub Actions workflows run automatically:
+
+| Workflow | Trigger | What it does |
+| --- | --- | --- |
+| `ci.yml` | push to `main`, PRs | Lint, unit tests, web build, PWA asset check, browser smoke test, debug APK |
+| `release.yml` | `v*` tags | Verifies the tag matches `package.json`, builds a signed AAB and APK, attaches them to a GitHub release |
 
 ## Project Structure
 
 ```
 fuelpilot/
-├── .github/
-│   └── workflows/
-│       └── build-apk.yml              # Auto-build APK on push
-├── index.html                          # Entry point
-├── package.json                        # Dependencies
-├── vite.config.js                      # Vite configuration
-├── capacitor.config.json               # Capacitor (Android) config
-└── src/
-    ├── main.jsx                        # React mount
-    └── App.jsx                         # Full app (single file)
+├── .github/workflows/
+│   ├── ci.yml                  # Lint, test, build, debug APK
+│   └── release.yml             # Signed AAB/APK on version tags
+├── android/                    # Capacitor Android project
+├── docs/
+│   └── PUBLISHING.md           # Release and Play Store guide
+├── public/
+│   ├── manifest.json           # PWA manifest
+│   ├── sw.js                   # Service worker (offline shell)
+│   └── icon-*.png              # Generated icon set
+├── scripts/
+│   └── generate-icons.mjs      # Regenerates the icons (npm run icons)
+├── tests/
+│   └── smoke.mjs               # Browser end-to-end smoke test
+├── src/
+│   ├── main.jsx                # React mount
+│   ├── App.jsx                 # UI, state and screens
+│   ├── ErrorBoundary.jsx       # Crash fallback with data export
+│   ├── registerSW.js           # Service worker registration
+│   └── lib/                    # Pure logic, unit tested
+│       ├── constants.js        # Shared constants
+│       ├── stats.js            # Consumption and cost calculations
+│       ├── maintenance.js      # Due-date and interval logic
+│       ├── csv.js              # Fuelio CSV import / CSV export
+│       ├── backup.js           # Backup validation and normalisation
+│       ├── storage.js          # Guarded localStorage access
+│       └── image.js            # Receipt photo compression
+├── PRIVACY.md                  # Privacy policy (required by Google Play)
+├── index.html
+├── package.json
+├── vite.config.js
+└── capacitor.config.json
 ```
 
-### Why Single File?
+### Structure Notes
 
-Same approach as Worth My Time — the entire app lives in `App.jsx`. State, UI, logic, styles — all in one place. No routing library, no state management library, no CSS framework. Just React + inline styles + localStorage.
+The UI lives in one `App.jsx` — no routing library, no state management library,
+no CSS framework, just React with inline styles and localStorage.
+
+Anything that can be reasoned about without a browser lives in `src/lib/`
+instead. That split is what makes the fuel maths testable; those modules import
+no React and touch no DOM.
 
 ## Tech Stack
 
@@ -135,9 +215,21 @@ Same approach as Worth My Time — the entire app lives in `App.jsx`. State, UI,
   - `@capacitor/filesystem` — save backup files to the device's Documents folder
 - **Chart.js 4** — lightweight charts for consumption & cost trends
 - **localStorage** — offline-first, no server, no account needed
-- **GitHub Actions** — automated APK builds on every push to `main` and on pull requests
+- **Vitest** — unit tests for the calculation, import and storage modules
+- **Playwright** — browser smoke test over the production build
+- **ESLint** — React and hooks rules, enforced in CI
+- **GitHub Actions** — lint/test/build on every push and PR; signed release builds on version tags
 
 ## Data Model
+
+Everything is held in `localStorage` under `fuelpilot_*` keys. Browsers allow
+roughly 5 MB per origin, and receipt photos dominate that budget — they are
+downscaled to 1280px JPEG on capture, and Settings shows a live storage meter.
+A failed write raises a banner offering an export rather than losing the edit
+silently.
+
+Backups are validated and normalised on import, so a truncated or hand-edited
+file cannot introduce records that break the UI.
 
 ### Vehicle
 
@@ -395,9 +487,13 @@ UI patterns:
 > Ship it.
 
 - [x] Capacitor Android build
-- [x] GitHub Actions APK workflow (`.github/workflows/build-apk.yml`) — builds on push to `main`, PRs, and manual dispatch
+- [x] GitHub Actions CI (`.github/workflows/ci.yml`) — lint, unit tests, web build and debug APK
+- [x] Signed release pipeline (`.github/workflows/release.yml`) — AAB and APK on version tags
 - [x] Onboarding flow (first vehicle setup wizard)
 - [x] PWA manifest (`public/manifest.json`) with home-screen shortcuts
+- [x] Service worker for offline use, plus the icon set the manifest requires
+- [x] Unit tests over the calculation, import and storage logic
+- [x] Google Play readiness — API 35, release signing, privacy policy
 - [ ] Localization (CZ / EN) — not yet implemented
 
 ### Extra Features (beyond original phases)
@@ -413,7 +509,7 @@ UI patterns:
 - [x] Bulk delete — select multiple refuels and delete at once
 - [x] Swipe-to-reveal — swipe a refuel row left to show Edit / Delete buttons
 - [x] Long-press context menu — long-press a row for a bottom-sheet menu
-- [x] Undo toast — 3-second undo window after any delete
+- [x] Undo toast — 6-second undo window after any delete, import or bulk action
 - [x] Data integrity warnings — badge on entries with suspicious odometer, large fills, or extreme prices
 - [x] Duplicate last refuel — pre-fill station + price from the most recent entry
 - [x] Odometer tracker — log standalone odometer readings (no fuel required)
@@ -423,9 +519,15 @@ UI patterns:
 - [x] Skeleton loading — shimmer placeholders shown briefly on first render
 - [x] Real-time cost/km preview — shows estimated cost/km while typing price in the refuel form
 
+## Privacy
+
+FuelPilot collects nothing. Every record stays in your device's local storage,
+there is no account and no server, and the app works with no connection at all.
+The full policy is in [PRIVACY.md](PRIVACY.md).
+
 ## License
 
-MIT — free for personal and commercial use.
+[MIT](LICENSE) — free for personal and commercial use.
 
 ---
 
