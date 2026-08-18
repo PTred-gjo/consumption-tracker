@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 and below (android:fullBackupContent).
+
+  All user data lives in the WebView's localStorage under app_webview, so that
+  directory is what makes a backup worth having. Caches are excluded because
+  they are large and regenerate on their own.
+-->
+<full-backup-content>
+    <include domain="file" path="app_webview" />
+    <exclude domain="file" path="app_webview/Default/Service Worker" />
+    <exclude domain="cache" path="." />
+    <exclude domain="external_cache" path="." />
+</full-backup-content>

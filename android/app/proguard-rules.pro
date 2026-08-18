@@ -5,17 +5,31 @@
 # For more details, see
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Capacitor resolves plugins and their methods reflectively by name, so R8 has
+# no way to see they are used and would strip them from a release build.
+-keep class com.getcapacitor.** { *; }
+-keep @com.getcapacitor.annotation.CapacitorPlugin class * { *; }
+-keep class * extends com.getcapacitor.Plugin { *; }
+-keepclassmembers class * {
+    @com.getcapacitor.PluginMethod public *;
+}
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# The bridge exposes these to JavaScript through addJavascriptInterface.
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Plugins used by this app.
+-keep class com.capacitorjs.plugins.localnotifications.** { *; }
+-keep class com.capacitorjs.plugins.filesystem.** { *; }
+
+# Cordova plugin shim that Capacitor loads by reflection.
+-keep class org.apache.cordova.** { *; }
+
+# Keep annotations R8 needs to read the rules above.
+-keepattributes *Annotation*, JavascriptInterface
+
+# Line numbers make a Play Console crash report readable; the source file name
+# is renamed so it does not leak paths.
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
