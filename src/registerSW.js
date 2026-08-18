@@ -25,10 +25,10 @@ export function registerServiceWorker() {
           if (!installing) return;
           installing.addEventListener('statechange', () => {
             // A new version is ready but the old one still controls the page.
-            // Activating it immediately would swap assets under a form in
-            // progress, so it takes effect on the next launch instead.
+            // The app offers a reload rather than swapping assets under a form
+            // that may be half filled in.
             if (installing.state === 'installed' && navigator.serviceWorker.controller) {
-              window.dispatchEvent(new CustomEvent('fp:update-available'));
+              window.dispatchEvent(new CustomEvent(UPDATE_EVENT));
             }
           });
         });
@@ -36,5 +36,27 @@ export function registerServiceWorker() {
       .catch((err) => {
         console.warn('Service worker registration failed:', err);
       });
+  });
+}
+
+/** Dispatched on `window` when a newer build has finished downloading. */
+export const UPDATE_EVENT = 'fp:update-available';
+
+/** Hand control to the waiting worker, then reload onto the new build. */
+export function applyServiceWorkerUpdate() {
+  if (!('serviceWorker' in navigator)) {
+    window.location.reload();
+    return;
+  }
+  navigator.serviceWorker.getRegistration().then((registration) => {
+    const waiting = registration?.waiting;
+    if (!waiting) {
+      window.location.reload();
+      return;
+    }
+    // Reload once the new worker has actually taken over, otherwise the page
+    // would come back on the old assets.
+    navigator.serviceWorker.addEventListener('controllerchange', () => window.location.reload(), { once: true });
+    waiting.postMessage('fp:skip-waiting');
   });
 }

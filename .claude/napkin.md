@@ -9,13 +9,15 @@
 ## Execution & Validation (Highest Priority)
 1. **[2026-08-18] `eslint <dir>` silently skips `.jsx`**
    Do instead: always run `npm run lint` (which passes `--ext .js,.jsx,.mjs`). Linting a bare directory hid undefined imports and unescaped JSX entities in `App.jsx`.
-2. **[2026-08-18] A green `vite build` does not mean the app works**
+2. **[2026-08-18] A `const` captured by an earlier `useEffect` throws a TDZ error at runtime**
+   Do instead: declare each `useEffect` *after* every `const`/`useCallback` it references. `App.jsx` is one long component, so an effect placed near the top that lists a later `const` in its deps builds cleanly, then dies on mount with "Cannot access X before initialization". Only the browser smoke test catches this.
+3. **[2026-08-18] A green `vite build` does not mean the app works**
    Do instead: run `npm run check` (lint + 92 unit tests + build), then the browser smoke test: `npm run build && npm run preview & && npm run test:e2e`.
-3. **[2026-08-18] No Android SDK in this container**
+4. **[2026-08-18] No Android SDK in this container**
    Do instead: never try `./gradlew` here — it cannot resolve the SDK. Android changes are verified by the `ci.yml` workflow on GitHub. Review gradle edits by eye.
-4. **[2026-08-18] Playwright chromium is at a versioned path**
+5. **[2026-08-18] Playwright chromium is at a versioned path**
    Do instead: `CHROMIUM_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome node tests/smoke.mjs`, and launch with `args: ['--no-sandbox']`.
-5. **[2026-08-18] `innerText` applies CSS `text-transform`**
+6. **[2026-08-18] `innerText` applies CSS `text-transform`**
    Do instead: match page text case-insensitively in `tests/smoke.mjs`. Much of this UI is uppercased, so `includes('Due soon')` fails against rendered "DUE SOON".
 
 ## Architecture & Conventions

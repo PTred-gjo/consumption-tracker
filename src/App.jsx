@@ -29,6 +29,7 @@ import { parseFuelioCSV, toCSV } from './lib/csv.js';
 import { estimateUsedBytes, onStorageError, readJSON, removeKey, writeJSON } from './lib/storage.js';
 import { compressImage, formatBytes } from './lib/image.js';
 import { buildBackup, sanitizeBackup } from './lib/backup.js';
+import { UPDATE_EVENT, applyServiceWorkerUpdate } from './registerSW.js';
 
 const DARK_COLORS = {
   bg: '#0A0A0A',
@@ -610,7 +611,7 @@ function UndoToast({ toast, onUndo }) {
             flexShrink: 0,
           }}
         >
-          Undo
+          {toast.actionLabel || 'Undo'}
         </button>
       )}
     </div>
@@ -1300,10 +1301,15 @@ export default function App() {
     setEditRefuelForm(null);
   }
 
-  const showUndoToast = useCallback((message, restore) => {
+  const showUndoToast = useCallback((message, restore, options = {}) => {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
-    undoTimerRef.current = setTimeout(() => setUndoToast(null), UNDO_TIMEOUT_MS);
-    setUndoToast({ message, restore: restore || null });
+    // A prompt that needs a decision must not disappear on its own.
+    if (options.persist) {
+      undoTimerRef.current = null;
+    } else {
+      undoTimerRef.current = setTimeout(() => setUndoToast(null), UNDO_TIMEOUT_MS);
+    }
+    setUndoToast({ message, restore: restore || null, actionLabel: options.actionLabel });
   }, []);
 
   function handleUndo() {
@@ -1317,6 +1323,19 @@ export default function App() {
   useEffect(() => () => {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
   }, []);
+
+  // A newly deployed PWA build only takes effect once the user accepts it.
+  // Declared after showUndoToast, which it captures.
+  useEffect(() => {
+    function handleUpdate() {
+      showUndoToast('A new version is available', applyServiceWorkerUpdate, {
+        actionLabel: 'Reload',
+        persist: true,
+      });
+    }
+    window.addEventListener(UPDATE_EVENT, handleUpdate);
+    return () => window.removeEventListener(UPDATE_EVENT, handleUpdate);
+  }, [showUndoToast]);
 
   function handleDeleteRefuel(id) {
     const entry = refuels.find((r) => r.id === id);

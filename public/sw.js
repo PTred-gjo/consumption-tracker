@@ -22,8 +22,14 @@ self.addEventListener('install', (event) => {
       // addAll rejects the whole install if any single URL 404s, so failures are
       // tolerated per-file and the entry is simply fetched later.
       .then((cache) => Promise.allSettled(PRECACHE_URLS.map((url) => cache.add(url))))
-      .then(() => self.skipWaiting())
   );
+  // Deliberately no skipWaiting() here: taking over immediately would swap the
+  // assets under a page that may have a half-filled refuel form open. The page
+  // asks for the handover itself, once the user accepts the update prompt.
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data === 'fp:skip-waiting') self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
