@@ -1,14 +1,45 @@
 apply plugin: 'com.android.application'
 
+/*
+ * Release signing.
+ *
+ * Credentials come from either android/keystore.properties (local builds) or
+ * environment variables (CI). Neither is committed. When nothing is configured
+ * the release build simply stays unsigned, so a debug-only checkout still works.
+ */
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+def resolveSigning = { String propKey, String envKey ->
+    keystoreProperties.getProperty(propKey) ?: System.getenv(envKey)
+}
+
+def storeFilePath = resolveSigning('storeFile', 'FUELPILOT_KEYSTORE_FILE')
+def storePassword = resolveSigning('storePassword', 'FUELPILOT_KEYSTORE_PASSWORD')
+def keyAliasValue = resolveSigning('keyAlias', 'FUELPILOT_KEY_ALIAS')
+def keyPasswordValue = resolveSigning('keyPassword', 'FUELPILOT_KEY_PASSWORD')
+def hasReleaseSigning = storeFilePath != null && file(storeFilePath).exists()
+
+// Version is owned by package.json so the web app and the store listing agree.
+def packageJson = new groovy.json.JsonSlurper().parse(rootProject.file('../package.json'))
+def appVersionName = packageJson.version
+// Play requires a strictly increasing integer. CI passes the run number;
+// locally it stays 1 so repeated debug builds install over each other.
+def appVersionCode = (System.getenv('FUELPILOT_VERSION_CODE') ?: '1') as Integer
+
 android {
     namespace "com.petrb.fuelpilot"
     compileSdk rootProject.ext.compileSdkVersion
+
     defaultConfig {
         applicationId "com.petrb.fuelpilot"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode appVersionCode
+        versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,10 +47,50 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+
+    signingConfigs {
+        release {
+            if (hasReleaseSigning) {
+                storeFile file(storeFilePath)
+                storePassword storePassword
+                keyAlias keyAliasValue
+                keyPassword keyPasswordValue
+            }
+        }
+    }
+
     buildTypes {
         release {
-            minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // Capacitor loads the UI from a WebView, so shrinking only touches
+            // the thin Java shell. Kept on to satisfy Play's size expectations.
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        // A lint regression should fail the build rather than ship.
+        abortOnError true
+        warningsAsErrors false
+        disable 'UnusedResources'
+    }
+
+    packagingOptions {
+        resources {
+            excludes += ['META-INF/*.kotlin_module', 'META-INF/DEPENDENCIES', 'META-INF/LICENSE*']
         }
     }
 }
@@ -34,6 +105,7 @@ dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core:$androidxCoreVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
     implementation project(':capacitor-android')
     testImplementation "junit:junit:$junitVersion"

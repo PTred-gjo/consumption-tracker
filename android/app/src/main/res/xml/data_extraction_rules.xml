@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (android:dataExtractionRules).
+
+  cloud-backup covers Google's automatic backup; device-transfer covers a
+  direct phone-to-phone migration. Both keep the WebView storage that holds the
+  refuel and maintenance records.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="file" path="app_webview" />
+        <exclude domain="file" path="app_webview/Default/Service Worker" />
+        <exclude domain="cache" path="." />
+        <exclude domain="external_cache" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="file" path="app_webview" />
+        <exclude domain="cache" path="." />
+        <exclude domain="external_cache" path="." />
+    </device-transfer>
+</data-extraction-rules>

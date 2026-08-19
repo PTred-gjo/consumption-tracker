@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  These three colours are referenced by AppTheme in styles.xml but were never
+  defined, so resource linking failed and the Android build could not complete.
+  Values match the web app's accent and background palette.
+-->
+<resources>
+    <color name="colorPrimary">#3B82F6</color>
+    <color name="colorPrimaryDark">#1D4ED8</color>
+    <color name="colorAccent">#60A5FA</color>
+
+    <!-- Splash and system bars -->
+    <color name="splashBackground">#0A0A0A</color>
+</resources>

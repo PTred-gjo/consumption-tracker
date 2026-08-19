@@ -3,6 +3,34 @@ import Chart from 'chart.js/auto';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 
+import {
+  CURRENCIES,
+  DEFAULT_BASE_PRICES,
+  DEFAULT_TRIP_TAGS,
+  FUEL_LABELS,
+  FUEL_TYPES,
+  MAINT_TYPES,
+  VEHICLE_COLORS,
+} from './lib/constants.js';
+import {
+  computeRefuelWarnings,
+  computeStats,
+  fmt,
+  formatDate,
+  getCurrentOdometer,
+  getVehicleRefuels,
+  num,
+  parseLocalDate,
+  todayIso,
+  uid,
+} from './lib/stats.js';
+import { getDueDate, getMaintenanceStatus, getNextDueItem } from './lib/maintenance.js';
+import { parseFuelioCSV, toCSV } from './lib/csv.js';
+import { estimateUsedBytes, onStorageError, readJSON, removeKey, writeJSON } from './lib/storage.js';
+import { compressImage, formatBytes } from './lib/image.js';
+import { buildBackup, sanitizeBackup } from './lib/backup.js';
+import { UPDATE_EVENT, applyServiceWorkerUpdate } from './registerSW.js';
+
 const DARK_COLORS = {
   bg: '#0A0A0A',
   surface: '#141414',
@@ -44,6 +72,11 @@ let COLORS = { ...DARK_COLORS };
 
 const SWIPE_CANCEL_THRESHOLD = 5; // px; rightward movement that cancels a swipe
 const SKELETON_DURATION_MS = 200; // ms; how long to show skeleton on first render
+const UNDO_TIMEOUT_MS = 6000;     // ms; how long a delete stays undoable
+const DRAFT_REFUEL_KEY = 'fuelpilot_draft_refuel';
+/** Browsers allow roughly 5 MB of localStorage per origin. */
+const STORAGE_BUDGET_BYTES = 5 * 1024 * 1024;
+const APP_VERSION = __APP_VERSION__;
 
 const TAB_ITEMS = [
   { key: 'refuel', icon: '⛽', label: 'Refuel' },
@@ -52,443 +85,31 @@ const TAB_ITEMS = [
   { key: 'settings', icon: '⚙', label: 'Settings' },
 ];
 
-const CURRENCIES = ['Kč', '€', '$', '£', 'zł', 'kr'];
+const TAB_KEYS = TAB_ITEMS.map((t) => t.key);
+/** Tab position, used to pick the slide direction when switching. */
+const TAB_INDEX = Object.fromEntries(TAB_ITEMS.map((t, i) => [t.key, i]));
 
-const VEHICLE_COLORS = ['#3B82F6', '#EF4444', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316', '#6366F1', '#84CC16'];
+const STATUS_COLOR_KEYS = { due: 'danger', upcoming: 'warning', ok: 'success' };
 
-const MAINT_TYPES = [
-  { value: 'oil_change', label: 'Oil Change' },
-  { value: 'tires', label: 'Tires' },
-  { value: 'stk', label: 'STK' },
-  { value: 'insurance', label: 'Insurance' },
-  { value: 'custom', label: 'Custom' },
-];
+/** Maps a maintenance status key to the current palette colour. */
+function statusColor(key) {
+  return COLORS[STATUS_COLOR_KEYS[key] || 'success'];
+}
 
-const FUEL_LABELS = { diesel: 'Diesel', petrol: 'Petrol', lpg: 'LPG', ev: 'EV' };
-
-// Feature 28: trip / purpose tags (default list — overridable via settings)
-const DEFAULT_TRIP_TAGS = ['Commute', 'Road Trip', 'Work', 'Personal'];
-
-// Feature 7 (CO₂): kg CO₂ emitted per litre of fuel (petrol used as default for unknown fuel types)
-const CO2_FACTORS = { diesel: 2.68, petrol: 2.31, lpg: 1.51, ev: 0 };
-
-const todayIso = () => new Date().toISOString().slice(0, 10);
-
+/**
+ * State mirrored into localStorage.
+ *
+ * Writes go through `writeJSON`, which reports a full quota instead of throwing
+ * out of the effect and tearing down the tree.
+ */
 function usePersistentState(key, initialValue) {
-  const [state, setState] = useState(() => {
-    try {
-      const raw = localStorage.getItem(key);
-      return raw ? JSON.parse(raw) : initialValue;
-    } catch {
-      return initialValue;
-    }
-  });
+  const [state, setState] = useState(() => readJSON(key, initialValue));
 
   useEffect(() => {
-    localStorage.setItem(key, JSON.stringify(state));
+    writeJSON(key, state);
   }, [key, state]);
 
   return [state, setState];
-}
-
-function num(value) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function fmt(value, digits = 2) {
-  if (!Number.isFinite(value)) return '-';
-  return value.toFixed(digits);
-}
-
-function monthKey(dateStr) {
-  return dateStr.slice(0, 7);
-}
-
-function formatDate(dateStr) {
-  if (!dateStr) return '-';
-  const date = new Date(`${dateStr}T00:00:00`);
-  return date.toLocaleDateString();
-}
-
-function getVehicleRefuels(refuels, vehicleId) {
-  return refuels
-    .filter((x) => x.vehicleId === vehicleId)
-    .slice()
-    .sort((a, b) => a.odometer - b.odometer || a.date.localeCompare(b.date) || a.createdAt - b.createdAt);
-}
-
-function computeConsumptionSeries(refuels) {
-  // Primary: accurate fill-to-full method — only emits points between two brimmed tanks.
-  let accumulatedLiters = 0;
-  let lastFullOdometer = null;
-  const fullTankPoints = [];
-
-  for (const entry of refuels) {
-    accumulatedLiters += entry.liters;
-
-    if (entry.isFullTank) {
-      if (lastFullOdometer !== null) {
-        const distance = entry.odometer - lastFullOdometer;
-        if (distance > 0) {
-          fullTankPoints.push({
-            date: entry.date,
-            odometer: entry.odometer,
-            value: (accumulatedLiters / distance) * 100,
-            liters: accumulatedLiters,
-            distance,
-          });
-        }
-      }
-
-      accumulatedLiters = 0;
-      lastFullOdometer = entry.odometer;
-    }
-  }
-
-  if (fullTankPoints.length > 0) return { points: fullTankPoints, isRolling: false };
-
-  // Fallback: rolling 3-fill window for users who rarely/never fill full.
-  // For each window [i-2, i-1, i] we use the liters of fills i-1 and i over the
-  // distance from fill i-2 to fill i. The first fill's liters are excluded because
-  // they replaced fuel consumed before this window's starting odometer.
-  const PARTIAL_WINDOW = 3;
-  const rollingPoints = [];
-  if (refuels.length >= PARTIAL_WINDOW) {
-    for (let i = PARTIAL_WINDOW - 1; i < refuels.length; i++) {
-      const windowStart = i - PARTIAL_WINDOW + 1;
-      const distance = refuels[i].odometer - refuels[windowStart].odometer;
-      if (distance <= 0) continue;
-      let sumLiters = 0;
-      for (let j = windowStart + 1; j <= i; j++) {
-        sumLiters += refuels[j].liters;
-      }
-      if (sumLiters <= 0) continue;
-      rollingPoints.push({
-        date: refuels[i].date,
-        odometer: refuels[i].odometer,
-        value: (sumLiters / distance) * 100,
-        liters: sumLiters,
-        distance,
-      });
-    }
-  }
-
-  return { points: rollingPoints, isRolling: rollingPoints.length > 0 };
-}
-
-function computeStats(refuels) {
-  if (!refuels.length) {
-    return {
-      consumptionSeries: [],
-      avgConsumption: 0,
-      isEstimatedConsumption: false,
-      bestConsumption: 0,
-      worstConsumption: 0,
-      avgDistancePerFill: 0,
-      monthlyCost: [],
-      priceSeries: [],
-      monthlyDistance: [],
-      totalCost: 0,
-      avgCostPerKm: 0,
-      lastCostPerKm: 0,
-      totalDistance: 0,
-      lastEntry: null,
-      firstEntry: null,
-      totalLiters: 0,
-      totalCo2: 0,
-      refuelCount: 0,
-    };
-  }
-
-  const firstEntry = refuels[0];
-  const lastEntry = refuels[refuels.length - 1];
-
-  const { points: consumptionSeries, isRolling } = computeConsumptionSeries(refuels);
-
-  // Distance-weighted average consumption: total fuel consumed / total distance × 100
-  let avgConsumption = 0;
-  let isEstimatedConsumption = isRolling;
-  if (consumptionSeries.length) {
-    const totalSeriesFuel = consumptionSeries.reduce((sum, p) => sum + p.liters, 0);
-    const totalSeriesDist = consumptionSeries.reduce((sum, p) => sum + p.distance, 0);
-    avgConsumption = totalSeriesDist > 0 ? (totalSeriesFuel / totalSeriesDist) * 100 : 0;
-  }
-
-  const lastConsumption = consumptionSeries.length
-    ? consumptionSeries[consumptionSeries.length - 1].value
-    : 0;
-
-  // Best (lowest) and worst (highest) consumption from the series
-  const bestConsumption = consumptionSeries.length
-    ? Math.min(...consumptionSeries.map((p) => p.value))
-    : 0;
-  const worstConsumption = consumptionSeries.length
-    ? Math.max(...consumptionSeries.map((p) => p.value))
-    : 0;
-
-  const totalCost = refuels.reduce((sum, entry) => sum + entry.totalCost, 0);
-  const totalLiters = refuels.reduce((sum, entry) => sum + entry.liters, 0);
-  const totalCo2 = refuels.reduce((sum, entry) => sum + entry.liters * (CO2_FACTORS[entry.fuelType] ?? CO2_FACTORS.petrol), 0);
-  const totalDistance = Math.max(0, lastEntry.odometer - firstEntry.odometer);
-
-  // Average distance between fill-ups (using odometer deltas between consecutive entries)
-  let avgDistancePerFill = 0;
-  if (refuels.length > 1) {
-    const deltas = [];
-    for (let i = 1; i < refuels.length; i += 1) {
-      const d = refuels[i].odometer - refuels[i - 1].odometer;
-      if (d > 0) deltas.push(d);
-    }
-    if (deltas.length) avgDistancePerFill = deltas.reduce((s, v) => s + v, 0) / deltas.length;
-  }
-
-  // Fallback: estimate consumption from tracked fuel / total distance when no full-tank series data.
-  // Mirrors the avgCostPerKm logic: exclude the first refuel (it fills the baseline tank).
-  if (avgConsumption === 0 && refuels.length > 1 && totalDistance > 0) {
-    const trackedFuel = totalLiters - firstEntry.liters;
-    if (trackedFuel > 0) {
-      avgConsumption = (trackedFuel / totalDistance) * 100;
-      isEstimatedConsumption = true;
-    }
-  }
-
-  // Exclude the first refuel's cost: it establishes the odometer baseline and the
-  // fuel in it was consumed *before* the tracked distance begins.
-  const costForTrackedDistance = refuels.length > 1 ? totalCost - firstEntry.totalCost : 0;
-  const avgCostPerKm = totalDistance > 0 ? costForTrackedDistance / totalDistance : 0;
-
-  // Cost per km for the last measured segment: last consumption × last price per litre ÷ 100
-  let lastCostPerKm = 0;
-  if (consumptionSeries.length > 0) {
-    const lastPoint = consumptionSeries[consumptionSeries.length - 1];
-    const matchingEntry = refuels.find(
-      (r) => r.isFullTank && r.odometer === lastPoint.odometer && r.date === lastPoint.date
-    );
-    if (matchingEntry) {
-      lastCostPerKm = (lastPoint.value * matchingEntry.pricePerLiter) / 100;
-    }
-  }
-
-  const monthlyCostMap = new Map();
-  const priceSeries = refuels.map((entry) => ({ date: entry.date, value: entry.pricePerLiter }));
-
-  for (const entry of refuels) {
-    const key = monthKey(entry.date);
-    monthlyCostMap.set(key, (monthlyCostMap.get(key) || 0) + entry.totalCost);
-  }
-
-  const monthlyDistanceMap = new Map();
-  for (let i = 1; i < refuels.length; i += 1) {
-    const current = refuels[i];
-    const previous = refuels[i - 1];
-    const distance = current.odometer - previous.odometer;
-    if (distance > 0) {
-      const key = monthKey(current.date);
-      monthlyDistanceMap.set(key, (monthlyDistanceMap.get(key) || 0) + distance);
-    }
-  }
-
-  const monthlyCost = Array.from(monthlyCostMap.entries()).map(([month, value]) => ({ month, value }));
-  const monthlyDistance = Array.from(monthlyDistanceMap.entries()).map(([month, value]) => ({ month, value }));
-
-  return {
-    consumptionSeries,
-    avgConsumption,
-    isEstimatedConsumption,
-    bestConsumption,
-    worstConsumption,
-    avgDistancePerFill,
-    lastConsumption,
-    monthlyCost,
-    priceSeries,
-    monthlyDistance,
-    totalCost,
-    avgCostPerKm,
-    lastCostPerKm,
-    totalDistance,
-    lastEntry,
-    firstEntry,
-    totalLiters,
-    totalCo2,
-    refuelCount: refuels.length,
-  };
-}
-
-function getCurrentOdometer(refuels) {
-  if (!refuels.length) return 0;
-  return Math.max(...refuels.map((x) => x.odometer));
-}
-
-function getMaintenanceStatus(item, currentOdometer) {
-  const now = new Date();
-  const lastDoneDate = item.lastDoneAt ? new Date(`${item.lastDoneAt}T00:00:00`) : null;
-
-  const dueDate = item.intervalDays > 0 && lastDoneDate
-    ? new Date(lastDoneDate.getTime() + item.intervalDays * 24 * 60 * 60 * 1000)
-    : null;
-  const dueOdometer = item.intervalKm > 0 ? item.lastDoneOdometer + item.intervalKm : null;
-
-  const dateDue = Boolean(dueDate && now >= dueDate);
-  const kmDue = Boolean(dueOdometer && currentOdometer >= dueOdometer);
-
-  if (dateDue || kmDue) {
-    return { key: 'due', label: 'Overdue', color: COLORS.danger };
-  }
-
-  const upcomingDate = Boolean(dueDate && dueDate.getTime() - now.getTime() <= 30 * 24 * 60 * 60 * 1000);
-  const upcomingKm = Boolean(dueOdometer && dueOdometer - currentOdometer <= 1000);
-
-  if (upcomingDate || upcomingKm) {
-    return { key: 'upcoming', label: 'Upcoming', color: COLORS.warning };
-  }
-
-  return { key: 'ok', label: 'OK', color: COLORS.success };
-}
-
-function uid(prefix) {
-  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/* ─── Feature 5: Fuelio CSV import helpers ─── */
-
-function parseCSVRow(line) {
-  const result = [];
-  let current = '';
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') {
-      if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
-      else inQuotes = !inQuotes;
-    } else if (ch === ',' && !inQuotes) {
-      result.push(current); current = '';
-    } else {
-      current += ch;
-    }
-  }
-  result.push(current);
-  return result.map((s) => s.trim());
-}
-
-function normalizeCurrencyStr(raw) {
-  const r = (raw || '').trim();
-  if (CURRENCIES.includes(r)) return r;
-  if (r === 'CZK' || r.toUpperCase() === 'CZK') return 'Kč';
-  if (r === 'EUR' || r.toUpperCase() === 'EUR') return '€';
-  if (r === 'USD' || r.toUpperCase() === 'USD') return '$';
-  if (r === 'GBP' || r.toUpperCase() === 'GBP') return '£';
-  if (r === 'PLN' || r.toUpperCase() === 'PLN') return 'zł';
-  if (['SEK', 'NOK', 'DKK'].includes(r.toUpperCase())) return 'kr';
-  return 'Kč';
-}
-
-function parseFuelioCSV(text) {
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-  if (!lines.length) throw new Error('Empty file');
-
-  // Locate header row (must contain a date column and either an odometer or fuel-quantity column)
-  let headerIdx = -1;
-  let cols = {};
-  for (let i = 0; i < Math.min(6, lines.length); i++) {
-    const row = parseCSVRow(lines[i]);
-    const lower = row.map((c) => c.toLowerCase());
-    if (lower.some((c) => c.includes('date')) && lower.some((c) => c.includes('odometer') || c.includes('quantity'))) {
-      headerIdx = i;
-      lower.forEach((c, idx) => {
-        if (c.includes('date')) cols.date = idx;
-        if (c.includes('quantity') || c.includes('fuel q')) cols.liters = idx;
-        if (c.includes('price per unit') || c === 'price/unit' || c.includes('price per')) cols.pricePerLiter = idx;
-        if (c.includes('total price') || c === 'total') cols.totalCost = idx;
-        if (c.includes('full') || (c.includes('partial') && cols.isFullTank === undefined)) cols.isFullTank = idx;
-        if (c.includes('odometer')) cols.odometer = idx;
-        if (c.includes('station')) cols.station = idx;
-        if ((c.includes('note') || c.includes('comment')) && cols.note === undefined) cols.note = idx;
-        if (c.includes('vehicle')) cols.vehicle = idx;
-        if (c.includes('fuel type') || (c === 'fuel' && cols.fuelType === undefined)) cols.fuelType = idx;
-        if (c.includes('currency')) cols.currency = idx;
-      });
-      break;
-    }
-  }
-
-  if (headerIdx === -1) throw new Error('Could not detect header row — expected Fuelio-style CSV');
-
-  const vehicleMap = {};
-  const refuelEntries = [];
-
-  for (let i = headerIdx + 1; i < lines.length; i++) {
-    const row = parseCSVRow(lines[i]);
-    if (!row.length || row.every((c) => !c)) continue;
-
-    const dateStr = cols.date !== undefined ? row[cols.date] || '' : '';
-    const liters = num(cols.liters !== undefined ? row[cols.liters] : 0);
-    const pricePerLiter = num(cols.pricePerLiter !== undefined ? row[cols.pricePerLiter] : 0);
-    const totalCostRaw = num(cols.totalCost !== undefined ? row[cols.totalCost] : 0);
-    const totalCost = totalCostRaw || liters * pricePerLiter;
-    const odoRaw = cols.odometer !== undefined ? row[cols.odometer] : '';
-    const odometer = num(String(odoRaw).replace(/[^0-9.]/g, ''));
-    const isFullTankRaw = cols.isFullTank !== undefined ? row[cols.isFullTank] : '1';
-    const isFullTank = isFullTankRaw === '1' || isFullTankRaw.toLowerCase() === 'true';
-    const station = (cols.station !== undefined ? row[cols.station] : '').trim();
-    const note = (cols.note !== undefined ? row[cols.note] : '').trim();
-    const vehicleName = (cols.vehicle !== undefined ? row[cols.vehicle] : '').trim() || 'Imported Vehicle';
-    const fuelTypeRaw = (cols.fuelType !== undefined ? row[cols.fuelType] : '').toLowerCase();
-    const currencyRaw = cols.currency !== undefined ? row[cols.currency] : '';
-
-    if (!odometer || !liters) continue;
-
-    // Parse date: DD/MM/YYYY [HH:MM] → YYYY-MM-DD
-    let isoDate = todayIso();
-    const dm = dateStr.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (dm) isoDate = `${dm[3]}-${dm[2].padStart(2, '0')}-${dm[1].padStart(2, '0')}`;
-
-    // Normalize fuel type
-    let fuelType = 'petrol';
-    if (fuelTypeRaw.includes('diesel') || fuelTypeRaw.includes('nafta')) fuelType = 'diesel';
-    else if (fuelTypeRaw.includes('lpg') || fuelTypeRaw.includes('lng')) fuelType = 'lpg';
-    else if (fuelTypeRaw.includes('ev') || fuelTypeRaw.includes('electric')) fuelType = 'ev';
-
-    if (!vehicleMap[vehicleName]) {
-      vehicleMap[vehicleName] = {
-        id: uid('v'),
-        name: vehicleName,
-        make: '',
-        model: '',
-        year: 0,
-        fuelType,
-        fuelTypes: [fuelType],
-        tankSize: 0,
-        currency: normalizeCurrencyStr(currencyRaw),
-        color: VEHICLE_COLORS[Object.keys(vehicleMap).length % VEHICLE_COLORS.length],
-        createdAt: Date.now(),
-      };
-    }
-
-    const vehicle = vehicleMap[vehicleName];
-    if (!vehicle.fuelTypes.includes(fuelType)) vehicle.fuelTypes.push(fuelType);
-
-    refuelEntries.push({
-      id: uid('r'),
-      vehicleId: vehicle.id,
-      date: isoDate,
-      odometer,
-      liters,
-      pricePerLiter: pricePerLiter || (liters > 0 ? totalCost / liters : 0),
-      totalCost,
-      fuelType,
-      isFullTank,
-      station,
-      note,
-      tripTag: '',
-      photo: null,
-      createdAt: Date.now(),
-    });
-  }
-
-  if (!refuelEntries.length) throw new Error('No valid refuel entries found in CSV');
-
-  return { vehicles: Object.values(vehicleMap), refuels: refuelEntries };
 }
 
 /* ─── Reusable UI components ─── */
@@ -767,9 +388,23 @@ function EmptyState({ icon, message }) {
 }
 
 function Modal({ open, title, onClose, children }) {
+  // Escape closes any modal, which is the only exit on a desktop browser once
+  // the dialog covers the screen.
+  useEffect(() => {
+    if (!open) return undefined;
+    function handleKey(e) {
+      if (e.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [open, onClose]);
+
   if (!open) return null;
   return (
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
       style={{
         position: 'fixed',
         top: 0,
@@ -822,6 +457,12 @@ function ConfirmDialog({ open, title, message, confirmLabel, confirmVariant, onC
 
 function ChartCard({ title, labels, values, type = 'line', color = COLORS.accent, unit, goalLine, pointColors }) {
   const ref = useRef(null);
+
+  // `labels`, `values`, `pointColors` and `goalLine` are rebuilt by the parent on
+  // every render. Depending on the identities directly tore the canvas down and
+  // rebuilt it each time — visible as a flicker on every keystroke. Depend on
+  // the serialised content instead, so the chart is rebuilt only when it changes.
+  const dataKey = JSON.stringify({ labels, values, pointColors, goalLine });
 
   useEffect(() => {
     if (!ref.current) return undefined;
@@ -896,13 +537,33 @@ function ChartCard({ title, labels, values, type = 'line', color = COLORS.accent
     });
 
     return () => chart.destroy();
-  }, [title, labels, values, type, color, unit, goalLine, pointColors]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [title, type, color, unit, dataKey]);
+
+  const isEmpty = !values || values.length === 0;
 
   return (
     <Card>
       <SectionTitle>{title}</SectionTitle>
-      <div style={{ height: 220 }}>
-        <canvas ref={ref} />
+      <div style={{ height: 220, position: 'relative' }}>
+        <canvas ref={ref} role="img" aria-label={`${title} chart`} />
+        {isEmpty && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: COLORS.textMuted,
+              fontSize: 13,
+              textAlign: 'center',
+              padding: 12,
+            }}
+          >
+            Not enough data yet
+          </div>
+        )}
       </div>
     </Card>
   );
@@ -950,7 +611,7 @@ function UndoToast({ toast, onUndo }) {
             flexShrink: 0,
           }}
         >
-          Undo
+          {toast.actionLabel || 'Undo'}
         </button>
       )}
     </div>
@@ -1262,7 +923,12 @@ export default function App() {
   const [importError, setImportError] = useState('');
   const [notifDaysBefore, setNotifDaysBefore] = usePersistentState('fuelpilot_notif_days', 7);
   const [notifDaysInput, setNotifDaysInput] = useState('');
-  const [maintServiceId, setMaintServiceId] = useState(null);
+  const [notifStatus, setNotifStatus] = useState(null);
+
+  // Raised when a localStorage write fails (usually a full quota). Shown as a
+  // persistent banner because silently losing edits is worse than an alert.
+  const [storageError, setStorageError] = useState(null);
+  const [photoError, setPhotoError] = useState('');
 
   // Feature 24: refuel interval reminder
   const [refuelIntervalDays, setRefuelIntervalDays] = usePersistentState('fuelpilot_refuel_interval_days', 14);
@@ -1290,6 +956,10 @@ export default function App() {
   const [markDoneItem, setMarkDoneItem] = useState(null);
   const [markDoneForm, setMarkDoneForm] = useState({ date: todayIso(), odometer: '', cost: '' });
 
+  // Inline validation message for the refuel form. Previously an invalid submit
+  // returned silently and looked like the button had stopped working.
+  const [formError, setFormError] = useState('');
+
   // Feature 17: bulk delete
   const [bulkSelectMode, setBulkSelectMode] = useState(false);
   const [bulkSelectedIds, setBulkSelectedIds] = useState(new Set());
@@ -1301,6 +971,16 @@ export default function App() {
   useMemo(() => {
     Object.assign(COLORS, theme === 'light' ? LIGHT_COLORS : DARK_COLORS);
   }, [theme]);
+
+  // Keep the browser/Android chrome in step with the in-app theme.
+  useEffect(() => {
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', theme === 'light' ? LIGHT_COLORS.bg : DARK_COLORS.bg);
+    document.documentElement.style.colorScheme = theme;
+    document.body.style.background = theme === 'light' ? LIGHT_COLORS.bg : DARK_COLORS.bg;
+  }, [theme]);
+
+  useEffect(() => onStorageError(setStorageError), []);
 
   // Brief hydration delay to show skeleton placeholders on first render
   useEffect(() => {
@@ -1320,9 +1000,11 @@ export default function App() {
   /* Edit / delete modal state */
   const [editRefuelId, setEditRefuelId] = useState(null);
   const [editRefuelForm, setEditRefuelForm] = useState(null);
+  const [editRefuelError, setEditRefuelError] = useState('');
   const [editMaintId, setEditMaintId] = useState(null);
   const [editMaintForm, setEditMaintForm] = useState(null);
   const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const [confirmClearPhotos, setConfirmClearPhotos] = useState(false);
   const [deleteVehicleId, setDeleteVehicleId] = useState(null);
   const [undoToast, setUndoToast] = useState(null);
   const undoTimerRef = useRef(null);
@@ -1379,14 +1061,7 @@ export default function App() {
 
   // Feature 15: auto-save draft refuel form (photo excluded to avoid storage bloat)
   const [refuelForm, setRefuelForm] = useState(() => {
-    try {
-      const saved = localStorage.getItem('fuelpilot_draft_refuel');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        return { ...parsed, photo: null };
-      }
-    } catch { /* ignore */ }
-    return {
+    const blank = {
       date: todayIso(),
       odometer: '',
       liters: '',
@@ -1398,11 +1073,16 @@ export default function App() {
       fuelType: '',
       tripTag: '',
     };
+    const saved = readJSON(DRAFT_REFUEL_KEY, null);
+    if (!saved || typeof saved !== 'object') return blank;
+    // A draft left open overnight would otherwise reopen dated yesterday and
+    // quietly log the fill against the wrong day.
+    return { ...blank, ...saved, date: todayIso(), photo: null };
   });
   useEffect(() => {
-    // eslint-disable-next-line no-unused-vars
-    const { photo: _photo, ...rest } = refuelForm;
-    localStorage.setItem('fuelpilot_draft_refuel', JSON.stringify(rest));
+    const { photo, ...rest } = refuelForm;
+    void photo; // never persisted: a base64 image would fill the storage quota
+    writeJSON(DRAFT_REFUEL_KEY, rest);
   }, [refuelForm]);
 
   const [maintForm, setMaintForm] = useState({
@@ -1418,8 +1098,12 @@ export default function App() {
 
   const [odometerForm, setOdometerForm] = useState({ date: todayIso(), odometer: '' });
 
+  // Seeds the form when the vehicle changes. Deliberately not reacting to
+  // `currentOdometer`: it moves on every new refuel and would overwrite what the
+  // user is typing.
   useEffect(() => {
     setMaintForm((prev) => ({ ...prev, lastDoneOdometer: currentOdometer || 0 }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedVehicleId]);
 
   // Feature 12: pre-populate odometer with last known value when vehicle changes
@@ -1433,18 +1117,27 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedVehicleId]);
 
+  const handleTabChange = useCallback((newTab) => {
+    setActiveTab((current) => {
+      setTabAnimDir(TAB_INDEX[newTab] > TAB_INDEX[current] ? 'right' : 'left');
+      return newTab;
+    });
+  }, []);
+
   // Feature 14: keyboard shortcuts
   useEffect(() => {
     function handleKeyDown(e) {
-      if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
-      if (e.key === 'r' || e.key === 'R') handleTabChange('refuel');
-      else if (e.key === 's' || e.key === 'S') handleTabChange('stats');
-      else if (e.key === 'm' || e.key === 'M') handleTabChange('maintenance');
-      else if (e.key === ',') handleTabChange('settings');
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) return;
+      const key = e.key.toLowerCase();
+      if (key === 'r') handleTabChange('refuel');
+      else if (key === 's') handleTabChange('stats');
+      else if (key === 'm') handleTabChange('maintenance');
+      else if (key === ',') handleTabChange('settings');
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  });
+  }, [handleTabChange]);
 
   // Feature 11: swipe-to-switch tabs
   const swipeStartRef = useRef(null);
@@ -1457,10 +1150,9 @@ export default function App() {
     const dy = Math.abs(e.changedTouches[0].clientY - swipeStartRef.current.y);
     swipeStartRef.current = null;
     if (Math.abs(dx) > 60 && dy < 40) {
-      const tabKeys = TAB_ITEMS.map((t) => t.key);
-      const currentIdx = tabKeys.indexOf(activeTab);
-      if (dx < 0 && currentIdx < tabKeys.length - 1) handleTabChange(tabKeys[currentIdx + 1]);
-      else if (dx > 0 && currentIdx > 0) handleTabChange(tabKeys[currentIdx - 1]);
+      const currentIdx = TAB_KEYS.indexOf(activeTab);
+      if (dx < 0 && currentIdx < TAB_KEYS.length - 1) handleTabChange(TAB_KEYS[currentIdx + 1]);
+      else if (dx > 0 && currentIdx > 0) handleTabChange(TAB_KEYS[currentIdx - 1]);
     }
   }
 
@@ -1509,8 +1201,17 @@ export default function App() {
     setRefuels((prev) => prev.filter((r) => r.vehicleId !== id));
     setMaintenance((prev) => prev.filter((m) => m.vehicleId !== id));
     setOdometerReadings((prev) => prev.filter((r) => r.vehicleId !== id));
+    // Without this the target lingers and would be reapplied to a future
+    // vehicle that happened to reuse the id.
+    setVehicleConsumptionTargets((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     setSelectedVehicleId((prevId) => (prevId === id ? '' : prevId));
     setDeleteVehicleId(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function addRefuel(e) {
@@ -1521,7 +1222,11 @@ export default function App() {
     const liters = num(refuelForm.liters);
     const pricePerLiter = num(refuelForm.pricePerLiter);
 
-    if (!odometer || !liters || !pricePerLiter) return;
+    if (!(odometer > 0) || !(liters > 0) || !(pricePerLiter > 0)) {
+      setFormError('Enter an odometer reading, a fuel quantity and a price per litre.');
+      return;
+    }
+    setFormError('');
 
     const entry = {
       id: uid('r'),
@@ -1544,7 +1249,9 @@ export default function App() {
     // Feature 10: haptic feedback on save
     navigator.vibrate?.(50);
     // Feature 15: clear draft on successful save
-    localStorage.removeItem('fuelpilot_draft_refuel');
+    removeKey(DRAFT_REFUEL_KEY);
+    setPhotoError('');
+    showUndoToast('Refuel saved', () => setRefuels((prev) => prev.filter((r) => r.id !== entry.id)));
     setRefuelForm({
       date: todayIso(),
       odometer: String(odometer),
@@ -1564,7 +1271,11 @@ export default function App() {
     const odometer = num(editRefuelForm.odometer);
     const liters = num(editRefuelForm.liters);
     const pricePerLiter = num(editRefuelForm.pricePerLiter);
-    if (!odometer || !liters || !pricePerLiter) return;
+    if (!(odometer > 0) || !(liters > 0) || !(pricePerLiter > 0)) {
+      setEditRefuelError('Odometer, litres and price per litre must all be greater than zero.');
+      return;
+    }
+    setEditRefuelError('');
 
     setRefuels((prev) =>
       prev.map((entry) =>
@@ -1590,11 +1301,16 @@ export default function App() {
     setEditRefuelForm(null);
   }
 
-  function showUndoToast(message, restore) {
+  const showUndoToast = useCallback((message, restore, options = {}) => {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
-    undoTimerRef.current = setTimeout(() => setUndoToast(null), 3000);
-    setUndoToast({ message, restore: restore || null });
-  }
+    // A prompt that needs a decision must not disappear on its own.
+    if (options.persist) {
+      undoTimerRef.current = null;
+    } else {
+      undoTimerRef.current = setTimeout(() => setUndoToast(null), UNDO_TIMEOUT_MS);
+    }
+    setUndoToast({ message, restore: restore || null, actionLabel: options.actionLabel });
+  }, []);
 
   function handleUndo() {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
@@ -1602,6 +1318,24 @@ export default function App() {
     if (undoToast?.restore) undoToast.restore();
     setUndoToast(null);
   }
+
+  // A pending toast timer would otherwise fire into an unmounted tree.
+  useEffect(() => () => {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+  }, []);
+
+  // A newly deployed PWA build only takes effect once the user accepts it.
+  // Declared after showUndoToast, which it captures.
+  useEffect(() => {
+    function handleUpdate() {
+      showUndoToast('A new version is available', applyServiceWorkerUpdate, {
+        actionLabel: 'Reload',
+        persist: true,
+      });
+    }
+    window.addEventListener(UPDATE_EVENT, handleUpdate);
+    return () => window.removeEventListener(UPDATE_EVENT, handleUpdate);
+  }, [showUndoToast]);
 
   function handleDeleteRefuel(id) {
     const entry = refuels.find((r) => r.id === id);
@@ -1770,56 +1504,103 @@ export default function App() {
   }
 
   async function scheduleMaintenanceNotifications() {
+    setNotifStatus({ tone: 'info', message: 'Requesting permission…' });
     try {
       const perm = await LocalNotifications.requestPermissions();
-      if (perm.display !== 'granted') return;
-      await LocalNotifications.cancel({ notifications: vehicleMaintenance.map((m) => ({ id: maintNotifId(m.id) })) });
+      if (perm.display !== 'granted') {
+        setNotifStatus({
+          tone: 'error',
+          message: 'Notification permission was denied. Enable notifications for FuelPilot in your device settings.',
+        });
+        return;
+      }
+
+      await LocalNotifications.cancel({
+        notifications: vehicleMaintenance.map((m) => ({ id: maintNotifId(m.id) })),
+      });
+
       const notifications = [];
       for (const item of vehicleMaintenance) {
-        const status = getMaintenanceStatus(item, currentOdometer);
-        if (status.key === 'due') continue;
-        if (item.intervalDays > 0) {
-          const dueDate = new Date(item.lastDoneAt);
-          dueDate.setDate(dueDate.getDate() + item.intervalDays - notifDaysBefore);
-          if (dueDate > new Date()) {
-            notifications.push({
-              id: maintNotifId(item.id),
-              title: `🔧 ${item.label} due soon`,
-              body: `${selectedVehicle?.name}: ${item.label} is due in ${notifDaysBefore} days`,
-              schedule: { at: dueDate },
-            });
-          }
-        }
+        // `getDueDate` parses the stored date as local midnight; `new Date(str)`
+        // treated it as UTC and drifted the reminder by a day.
+        const dueDate = getDueDate(item);
+        if (!dueDate) continue;
+        const notifyAt = new Date(dueDate.getTime());
+        notifyAt.setDate(notifyAt.getDate() - notifDaysBefore);
+        notifyAt.setHours(9, 0, 0, 0);
+        if (notifyAt <= new Date()) continue;
+
+        notifications.push({
+          id: maintNotifId(item.id),
+          title: `🔧 ${item.label} due soon`,
+          body: `${selectedVehicle?.name || 'Your vehicle'}: ${item.label} is due on ${dueDate.toLocaleDateString()}`,
+          schedule: { at: notifyAt },
+        });
       }
+
       if (notifications.length) {
         await LocalNotifications.schedule({ notifications });
+        setNotifStatus({ tone: 'success', message: `Scheduled ${notifications.length} reminder(s).` });
+      } else {
+        setNotifStatus({
+          tone: 'info',
+          message: 'Nothing to schedule — no reminder has a future due date with a day-based interval.',
+        });
       }
-      showUndoToast(`Scheduled ${notifications.length} notification(s)`, null);
-    } catch {
-      // Notifications not available on web
+    } catch (err) {
+      setNotifStatus({
+        tone: 'error',
+        message: `Notifications are unavailable here: ${err?.message || 'not supported in this browser'}. They work in the installed Android app.`,
+      });
     }
+  }
+
+  function currentBackupPayload() {
+    return buildBackup({
+      vehicles,
+      refuels,
+      maintenance,
+      odometerReadings,
+      selectedVehicleId,
+      settings: {
+        theme,
+        notifDaysBefore,
+        refuelIntervalDays,
+        lowFuelThresholdKm,
+        monthlyBudget,
+        customTripTags,
+        vehicleConsumptionTargets,
+      },
+    });
+  }
+
+  function downloadBlob(contents, filename, mime) {
+    const blob = new Blob([contents], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    // Revoking synchronously can cancel the download in some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   // Feature 20: auto-backup to device storage
   async function autoBackupToDevice() {
+    const payload = JSON.stringify(currentBackupPayload(), null, 2);
+    const filename = `fuelpilot-backup-${todayIso()}.json`;
     try {
-      const payload = JSON.stringify({ exportedAt: new Date().toISOString(), vehicles, refuels, maintenance, odometerReadings, selectedVehicleId }, null, 2);
       await Filesystem.writeFile({
-        path: `fuelpilot-backup-${todayIso()}.json`,
+        path: filename,
         data: payload,
         directory: Directory.Documents,
         encoding: Encoding.UTF8,
       });
-      showUndoToast('Backup saved to Documents folder', null);
+      showUndoToast('Backup saved to Documents', null);
     } catch {
-      // Fallback: trigger browser download
-      const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), vehicles, refuels, maintenance, odometerReadings, selectedVehicleId }, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `fuelpilot-backup-${todayIso()}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      // Not running inside the native shell — fall back to a browser download.
+      downloadBlob(payload, filename, 'application/json');
+      showUndoToast('Backup downloaded', null);
     }
   }
 
@@ -1919,7 +1700,8 @@ export default function App() {
   // Feature 24: days since last refuel
   const daysSinceLastRefuel = useMemo(() => {
     if (!stats.lastEntry) return null;
-    const last = new Date(`${stats.lastEntry.date}T00:00:00`);
+    const last = parseLocalDate(stats.lastEntry.date);
+    if (!last) return null;
     return Math.floor((Date.now() - last.getTime()) / (1000 * 60 * 60 * 24));
   }, [stats.lastEntry]);
 
@@ -1971,26 +1753,10 @@ export default function App() {
   }, [filteredStats.consumptionSeries, filteredRefuels]);
 
   // Feature 16: data integrity warnings per refuel entry
-  const refuelWarnings = useMemo(() => {
-    const warnings = new Map();
-    const avgPrice =
-      vehicleRefuels.length > 0
-        ? vehicleRefuels.reduce((s, r) => s + r.pricePerLiter, 0) / vehicleRefuels.length
-        : 0;
-    for (let i = 0; i < vehicleRefuels.length; i++) {
-      const r = vehicleRefuels[i];
-      const warns = [];
-      if (i > 0 && r.odometer <= vehicleRefuels[i - 1].odometer) {
-        warns.push('Odometer not increasing');
-      }
-      if (r.liters > 100) warns.push(`Large fill: ${r.liters.toFixed(1)} L`);
-      if (avgPrice > 0 && r.pricePerLiter > avgPrice * 3) {
-        warns.push(`Unusually high price (avg: ${fmt(avgPrice, 2)})`);
-      }
-      if (warns.length > 0) warnings.set(r.id, warns);
-    }
-    return warnings;
-  }, [vehicleRefuels]);
+  const refuelWarnings = useMemo(
+    () => computeRefuelWarnings(vehicleRefuels, selectedVehicle?.tankSize || 0),
+    [vehicleRefuels, selectedVehicle]
+  );
 
   function clearHistoryFilters() {
     setHistorySearch('');
@@ -2050,17 +1816,27 @@ export default function App() {
     }));
   }
 
-  // Read a file input as base64 data URL (feature 14)
-  function readPhotoFile(file, onDone) {
+  /**
+   * Read a receipt photo, downscaled and re-encoded as JPEG.
+   * A raw phone photo is several megabytes, which alone exceeds the whole
+   * localStorage budget.
+   */
+  async function readPhotoFile(file, onDone) {
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => onDone(ev.target.result);
-    reader.readAsDataURL(file);
+    setPhotoError('');
+    try {
+      onDone(await compressImage(file));
+    } catch (err) {
+      setPhotoError(err?.message || 'The photo could not be attached.');
+    }
   }
 
   function exportCSV() {
     if (!vehicleRefuels.length) return;
-    const headers = ['Date', 'Odometer (km)', 'Liters', `Price/L (${currency})`, `Total (${currency})`, 'Full Tank', 'Station', 'Note'];
+    const headers = [
+      'Date', 'Odometer (km)', 'Liters', `Price/L (${currency})`, `Total (${currency})`,
+      'Full Tank', 'Fuel Type', 'Trip Tag', 'Station', 'Note',
+    ];
     const rows = vehicleRefuels
       .slice()
       .reverse()
@@ -2071,38 +1847,22 @@ export default function App() {
         e.pricePerLiter,
         fmt(e.totalCost, 2),
         e.isFullTank ? 'Yes' : 'No',
+        FUEL_LABELS[e.fuelType] || e.fuelType || '',
+        e.tripTag || '',
         e.station || '',
         e.note || '',
       ]);
-    const csv = [headers, ...rows]
-      .map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
-      .join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `fuelpilot-refuels-${todayIso()}.csv`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    // The BOM makes Excel read the file as UTF-8 rather than the system codepage,
+    // which otherwise mangles the currency symbols and accented station names.
+    downloadBlob(`\ufeff${toCSV([headers, ...rows])}`, `fuelpilot-refuels-${todayIso()}.csv`, 'text/csv;charset=utf-8');
   }
 
   function exportData() {
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      vehicles,
-      refuels,
-      maintenance,
-      odometerReadings,
-      selectedVehicleId,
-    };
-
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `fuelpilot-backup-${todayIso()}.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(
+      JSON.stringify(currentBackupPayload(), null, 2),
+      `fuelpilot-backup-${todayIso()}.json`,
+      'application/json'
+    );
   }
 
   // Feature 18: import JSON with strategy selection
@@ -2115,54 +1875,49 @@ export default function App() {
   function executeImport(file, strategy) {
     if (!file) return;
     const reader = new FileReader();
+    reader.onerror = () => setImportError('The file could not be read.');
     reader.onload = () => {
       try {
-        const raw = String(reader.result || '{}');
-        const parsed = JSON.parse(raw);
-
-        if (!Array.isArray(parsed.vehicles) || !Array.isArray(parsed.refuels) || !Array.isArray(parsed.maintenance)) {
-          throw new Error('Invalid backup shape');
-        }
+        // `sanitizeBackup` coerces every record to a complete shape. Storing a
+        // record with a missing odometer or date would throw later, during render.
+        const backup = sanitizeBackup(JSON.parse(String(reader.result || 'null')));
+        const { dropped } = backup;
+        const droppedTotal = Object.values(dropped).reduce((s, v) => s + v, 0);
 
         if (strategy === 'merge') {
-          // Merge: keep existing data, append new records by ID
-          setVehicles((prev) => {
-            const existingIds = new Set(prev.map((v) => v.id));
-            return [...prev, ...parsed.vehicles.filter((v) => !existingIds.has(v.id))];
-          });
-          setRefuels((prev) => {
-            const existingIds = new Set(prev.map((r) => r.id));
-            return [...prev, ...parsed.refuels.filter((r) => !existingIds.has(r.id))];
-          });
-          setMaintenance((prev) => {
-            const existingIds = new Set(prev.map((m) => m.id));
-            return [...prev, ...parsed.maintenance.filter((m) => !existingIds.has(m.id))];
-          });
-          if (Array.isArray(parsed.odometerReadings)) {
-            setOdometerReadings((prev) => {
-              const existingIds = new Set(prev.map((r) => r.id));
-              return [...prev, ...parsed.odometerReadings.filter((r) => !existingIds.has(r.id))];
-            });
-          }
-          showUndoToast(`Merged ${parsed.refuels.length} refuels`, null);
+          const mergeById = (prev, incoming) => {
+            const existingIds = new Set(prev.map((x) => x.id));
+            return [...prev, ...incoming.filter((x) => !existingIds.has(x.id))];
+          };
+          setVehicles((prev) => mergeById(prev, backup.vehicles));
+          setRefuels((prev) => mergeById(prev, backup.refuels));
+          setMaintenance((prev) => mergeById(prev, backup.maintenance));
+          setOdometerReadings((prev) => mergeById(prev, backup.odometerReadings));
+          showUndoToast(`Merged ${backup.refuels.length} refuel(s)`, null);
         } else {
-          // Replace all
-          setVehicles(parsed.vehicles);
-          setRefuels(parsed.refuels);
-          setMaintenance(parsed.maintenance);
-          if (Array.isArray(parsed.odometerReadings)) setOdometerReadings(parsed.odometerReadings);
-
-          if (parsed.selectedVehicleId) {
-            setSelectedVehicleId(parsed.selectedVehicleId);
-          } else if (parsed.vehicles.length) {
-            setSelectedVehicleId(parsed.vehicles[0].id);
-          }
-          showUndoToast('Backup imported', null);
+          // Replacing is destructive, so snapshot enough state to undo it.
+          const previous = { vehicles, refuels, maintenance, odometerReadings, selectedVehicleId };
+          setVehicles(backup.vehicles);
+          setRefuels(backup.refuels);
+          setMaintenance(backup.maintenance);
+          setOdometerReadings(backup.odometerReadings);
+          setSelectedVehicleId(backup.selectedVehicleId);
+          showUndoToast(`Imported ${backup.refuels.length} refuel(s)`, () => {
+            setVehicles(previous.vehicles);
+            setRefuels(previous.refuels);
+            setMaintenance(previous.maintenance);
+            setOdometerReadings(previous.odometerReadings);
+            setSelectedVehicleId(previous.selectedVehicleId);
+          });
         }
 
-        setImportError('');
-      } catch {
-        setImportError('Invalid JSON backup file.');
+        setImportError(
+          droppedTotal > 0
+            ? `Imported successfully. ${droppedTotal} incomplete record(s) were skipped.`
+            : ''
+        );
+      } catch (err) {
+        setImportError(err?.message || 'This file is not a valid FuelPilot backup.');
       }
     };
     reader.readAsText(file);
@@ -2172,9 +1927,10 @@ export default function App() {
   function importCSVFile(file) {
     if (!file) return;
     const reader = new FileReader();
+    reader.onerror = () => setImportCSVError('The file could not be read.');
     reader.onload = () => {
       try {
-        const { vehicles: csvVehicles, refuels: csvRefuels } = parseFuelioCSV(String(reader.result || ''));
+        const { vehicles: csvVehicles, refuels: csvRefuels, skipped } = parseFuelioCSV(String(reader.result || ''));
 
         // Snapshot current vehicles to build name → final-ID mapping synchronously
         const currentVehicles = vehicles;
@@ -2208,13 +1964,40 @@ export default function App() {
           setSelectedVehicleId(csvIdToFinalId[csvVehicles[0].id] || csvVehicles[0].id);
         }
 
-        setImportCSVError('');
-        showUndoToast(`Imported ${remappedRefuels.length} refuels from CSV`, null);
+        const importedIds = new Set(remappedRefuels.map((r) => r.id));
+        const newVehicleIds = new Set(newVehicles.map((v) => v.id));
+        showUndoToast(`Imported ${remappedRefuels.length} refuel(s)`, () => {
+          setRefuels((prev) => prev.filter((r) => !importedIds.has(r.id)));
+          setVehicles((prev) => prev.filter((v) => !newVehicleIds.has(v.id)));
+        });
+
+        setImportCSVError(skipped > 0 ? `${skipped} row(s) without an odometer or quantity were skipped.` : '');
       } catch (err) {
-        setImportCSVError(`CSV import error: ${err.message}`);
+        setImportCSVError(err?.message || 'The CSV could not be imported.');
       }
     };
     reader.readAsText(file);
+  }
+
+  const photoCount = useMemo(() => refuels.filter((r) => r.photo).length, [refuels]);
+
+  // localStorage exposes no size event, so the collections that get written are
+  // used as the recompute trigger even though the reader takes no arguments.
+  const storageUsedBytes = useMemo(
+    () => estimateUsedBytes(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [refuels, vehicles, maintenance, odometerReadings]
+  );
+  const storageUsedRatio = storageUsedBytes / STORAGE_BUDGET_BYTES;
+
+  function removeAllPhotos() {
+    const withPhotos = refuels.filter((r) => r.photo);
+    setRefuels((prev) => prev.map((r) => (r.photo ? { ...r, photo: null } : r)));
+    setConfirmClearPhotos(false);
+    const restore = new Map(withPhotos.map((r) => [r.id, r.photo]));
+    showUndoToast(`Removed ${withPhotos.length} photo(s)`, () =>
+      setRefuels((prev) => prev.map((r) => (restore.has(r.id) ? { ...r, photo: restore.get(r.id) } : r)))
+    );
   }
 
   const currency = selectedVehicle?.currency || 'Kč';
@@ -2223,8 +2006,6 @@ export default function App() {
   const PRICE_TABLE_ROWS = 8;
   const PRICE_TABLE_CENTER_OFFSET = 2; // rows below the base price
   const PRICE_TABLE_STEP_PCT = 0.05;   // 5% of base price per row
-  // Default base prices (typical retail per-litre prices by common currency)
-  const DEFAULT_BASE_PRICES = { '€': 1.6, '$': 3.5, '£': 1.5, 'zł': 6.5, 'kr': 18 };
   const lastKnownPrice = stats.priceSeries.length > 0
     ? stats.priceSeries[stats.priceSeries.length - 1].value
     : 0;
@@ -2234,13 +2015,6 @@ export default function App() {
   const quickTablePrices = Array.from({ length: PRICE_TABLE_ROWS }, (_, i) =>
     Math.round((tablePriceBase - PRICE_TABLE_CENTER_OFFSET * tableStep + i * tableStep) * 100) / 100
   ).filter((p) => p > 0);
-  const TAB_ORDER = { refuel: 0, stats: 1, maintenance: 2, settings: 3 };
-
-  function handleTabChange(newTab) {
-    setTabAnimDir((TAB_ORDER[newTab] || 0) > (TAB_ORDER[activeTab] || 0) ? 'right' : 'left');
-    setActiveTab(newTab);
-  }
-
   return (
     <div
       style={{
@@ -2311,7 +2085,12 @@ export default function App() {
         style={{
           maxWidth: 720,
           margin: '0 auto',
-          padding: '20px 16px calc(90px + env(safe-area-inset-bottom))',
+          // The Android activity runs edge-to-edge, so content would otherwise
+          // sit under the status bar and the display cutout.
+          paddingTop: 'calc(20px + env(safe-area-inset-top))',
+          paddingRight: 'calc(16px + env(safe-area-inset-right))',
+          paddingBottom: 'calc(90px + env(safe-area-inset-bottom))',
+          paddingLeft: 'calc(16px + env(safe-area-inset-left))',
         }}
       >
         {/* Header */}
@@ -2340,6 +2119,38 @@ export default function App() {
         <div style={{ color: COLORS.textSecondary, marginBottom: 18, fontSize: 13, paddingLeft: 2 }}>
           Smart fuel tracker · real costs per kilometer
         </div>
+
+        {/* A failed write means edits are being silently dropped, so this stays
+            on screen until the user acts on it. */}
+        {storageError && (
+          <div
+            role="alert"
+            style={{
+              marginBottom: 14,
+              background: `${COLORS.danger}1a`,
+              border: `1px solid ${COLORS.danger}55`,
+              borderRadius: 12,
+              padding: '12px 14px',
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: 10,
+            }}
+          >
+            <span style={{ fontSize: 20, lineHeight: 1 }}>⚠️</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.danger, marginBottom: 2 }}>
+                Changes are not being saved
+              </div>
+              <div style={{ fontSize: 12, color: COLORS.textSecondary, lineHeight: 1.5 }}>
+                {storageError.message}
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <Button type="button" size="small" onClick={exportData}>💾 Export backup</Button>
+                <Button type="button" size="small" variant="ghost" onClick={() => setStorageError(null)}>Dismiss</Button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Vehicle selector */}
         {vehicles.length > 0 && (
@@ -2428,7 +2239,7 @@ export default function App() {
                   onChange={(e) => setVehicleForm((prev) => ({ ...prev, secondaryFuelType: e.target.value }))}
                 >
                   <option value="">None</option>
-                  {['diesel', 'petrol', 'lpg', 'ev'].filter((f) => f !== vehicleForm.fuelType).map((f) => (
+                  {FUEL_TYPES.filter((f) => f !== vehicleForm.fuelType).map((f) => (
                     <option key={f} value={f}>{FUEL_LABELS[f]}</option>
                   ))}
                 </Select>
@@ -2533,7 +2344,7 @@ export default function App() {
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.warning }}>Refuel reminder</div>
                     <div style={{ fontSize: 12, color: COLORS.textSecondary }}>
-                      You haven't logged a refuel in <strong>{daysSinceLastRefuel} days</strong>. Time to fill up or update your log?
+                      You haven&apos;t logged a refuel in <strong>{daysSinceLastRefuel} days</strong>. Time to fill up or update your log?
                     </div>
                   </div>
                 </div>
@@ -2706,10 +2517,21 @@ export default function App() {
                       type="file"
                       accept="image/*"
                       capture="environment"
-                      onChange={(e) => readPhotoFile(e.target.files?.[0], (data) => setRefuelForm((prev) => ({ ...prev, photo: data })))}
+                      onChange={(e) => {
+                        readPhotoFile(e.target.files?.[0], (data) => setRefuelForm((prev) => ({ ...prev, photo: data })));
+                        e.target.value = '';
+                      }}
                     />
                   )}
+                  {photoError && (
+                    <div style={{ color: COLORS.danger, fontSize: 12, marginTop: 6 }}>{photoError}</div>
+                  )}
                 </div>
+                {formError && (
+                  <div role="alert" style={{ color: COLORS.danger, fontSize: 13, background: COLORS.dangerBg, border: `1px solid ${COLORS.danger}44`, borderRadius: 10, padding: '8px 12px' }}>
+                    {formError}
+                  </div>
+                )}
                 <div style={{ display: 'flex', gap: 8, marginTop: 2 }}>
                   <Button type="submit" style={{ flex: 1 }}>Save refuel</Button>
                   {sortedHistory.length > 0 && (
@@ -3217,20 +3039,10 @@ export default function App() {
             {vehicleMaintenance.length > 0 && (() => {
               const allStatuses = vehicleMaintenance.map((item) => getMaintenanceStatus(item, currentOdometer));
               const dueCount = allStatuses.filter((s) => s.key === 'due').length;
-              const soonCount = allStatuses.filter((s) => s.key === 'soon').length;
-              // Find next upcoming item by days
-              const upcoming = vehicleMaintenance
-                .map((item) => {
-                  if (!item.intervalDays) return null;
-                  const dueDate = new Date(item.lastDoneAt);
-                  dueDate.setDate(dueDate.getDate() + item.intervalDays);
-                  const daysLeft = Math.ceil((dueDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-                  const kmLeft = item.intervalKm > 0 ? (item.lastDoneOdometer + item.intervalKm) - currentOdometer : null;
-                  return { item, daysLeft, kmLeft };
-                })
-                .filter(Boolean)
-                .filter((x) => x.daysLeft > 0)
-                .sort((a, b) => a.daysLeft - b.daysLeft)[0];
+              // Counted 'soon' before, a key `getMaintenanceStatus` never returns,
+              // so this tile always read zero.
+              const soonCount = allStatuses.filter((s) => s.key === 'upcoming').length;
+              const upcoming = getNextDueItem(vehicleMaintenance, currentOdometer);
               return (
                 <div style={{
                   background: dueCount > 0 ? `${COLORS.danger}18` : `${COLORS.accent}10`,
@@ -3256,7 +3068,7 @@ export default function App() {
                   </div>
                   <div>
                     <div style={{ fontSize: 15, fontWeight: 800, color: COLORS.accent }}>
-                      {upcoming ? `${upcoming.daysLeft}d` : '—'}
+                      {upcoming ? `${upcoming.status.daysLeft}d` : '—'}
                     </div>
                     <div style={{ fontSize: 11, color: COLORS.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>
                       {upcoming ? `Next: ${upcoming.item.label.slice(0, 10)}` : 'All clear'}
@@ -3278,7 +3090,7 @@ export default function App() {
                       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, alignItems: 'center' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                           <strong>{item.label}</strong>
-                          <StatusPill color={status.color} label={status.label} />
+                          <StatusPill color={statusColor(status.key)} label={status.label} />
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                           <IconButton onClick={() => openEditMaint(item)} title="Edit">✏️</IconButton>
@@ -3286,8 +3098,20 @@ export default function App() {
                         </div>
                       </div>
                       <div style={{ color: COLORS.textSecondary, fontSize: 13, lineHeight: 1.6 }}>
-                        <div>Last: {formatDate(item.lastDoneAt)} · {item.lastDoneOdometer.toLocaleString()} km</div>
+                        <div>Last: {formatDate(item.lastDoneAt)} · {num(item.lastDoneOdometer).toLocaleString()} km</div>
                         <div>Due: {item.intervalDays ? `${item.intervalDays} days` : '-'} · {dueAtKm ? `${dueAtKm.toLocaleString()} km` : '-'}</div>
+                        {(status.daysLeft !== null || status.kmLeft !== null) && (
+                          <div style={{ color: statusColor(status.key) }}>
+                            {[
+                              status.daysLeft !== null
+                                ? status.daysLeft >= 0 ? `${status.daysLeft} days left` : `${Math.abs(status.daysLeft)} days overdue`
+                                : null,
+                              status.kmLeft !== null
+                                ? status.kmLeft >= 0 ? `${status.kmLeft.toLocaleString()} km left` : `${Math.abs(status.kmLeft).toLocaleString()} km overdue`
+                                : null,
+                            ].filter(Boolean).join(' · ')}
+                          </div>
+                        )}
                         {item.cost > 0 && <div>Cost: {fmt(item.cost)} {currency}</div>}
                       </div>
                       {item.note && <div style={{ color: COLORS.textMuted, marginTop: 4, fontSize: 12, fontStyle: 'italic' }}>💬 {item.note}</div>}
@@ -3299,25 +3123,25 @@ export default function App() {
                           </summary>
                           <div style={{ marginTop: 6, display: 'grid', gap: 4 }}>
                             {item.history.slice().reverse().map((h, i) => (
-                              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: COLORS.textSecondary, background: COLORS.bg, borderRadius: 6, padding: '4px 8px' }}>
+                              <div key={`${h.date}-${h.odometer}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: COLORS.textSecondary, background: COLORS.bg, borderRadius: 6, padding: '4px 8px' }}>
                                 <span>{formatDate(h.date)}</span>
-                                <span>{h.odometer.toLocaleString()} km</span>
+                                <span>{num(h.odometer).toLocaleString()} km</span>
                                 {h.cost > 0 && <span>{fmt(h.cost)} {currency}</span>}
                               </div>
                             ))}
                           </div>
                         </details>
                       )}
-                      {(status.key === 'due' || status.key === 'soon') && (
-                        <Button
-                          variant="success"
-                          size="small"
-                          style={{ marginTop: 8, width: '100%' }}
-                          onClick={() => openMarkDone(item)}
-                        >
-                          ✓ Mark as done today…
-                        </Button>
-                      )}
+                      {/* Offered for every item: a service can be logged before it
+                          falls due, and the old 'soon' check never matched. */}
+                      <Button
+                        variant={status.key === 'ok' ? 'secondary' : 'success'}
+                        size="small"
+                        style={{ marginTop: 8, width: '100%' }}
+                        onClick={() => openMarkDone(item)}
+                      >
+                        ✓ Mark as done…
+                      </Button>
                     </div>
                   );
                 })}
@@ -3451,7 +3275,7 @@ export default function App() {
                     onChange={(e) => setVehicleForm((prev) => ({ ...prev, secondaryFuelType: e.target.value }))}
                   >
                     <option value="">None</option>
-                    {['diesel', 'petrol', 'lpg', 'ev'].filter((f) => f !== vehicleForm.fuelType).map((f) => (
+                    {FUEL_TYPES.filter((f) => f !== vehicleForm.fuelType).map((f) => (
                       <option key={f} value={f}>{FUEL_LABELS[f]}</option>
                     ))}
                   </Select>
@@ -3677,7 +3501,12 @@ export default function App() {
                 <Input
                   type="file"
                   accept=".csv,text/csv"
-                  onChange={(e) => { setImportCSVError(''); importCSVFile(e.target.files?.[0]); }}
+                  onChange={(e) => {
+                    setImportCSVError('');
+                    importCSVFile(e.target.files?.[0]);
+                    // Cleared so re-picking the same file fires change again.
+                    e.target.value = '';
+                  }}
                 />
                 {importCSVError && <div style={{ color: COLORS.danger, marginTop: 6, fontSize: 13 }}>{importCSVError}</div>}
               </div>
@@ -3715,13 +3544,25 @@ export default function App() {
               <Button type="button" variant="secondary" onClick={scheduleMaintenanceNotifications} style={{ width: '100%' }}>
                 📲 Schedule notifications now
               </Button>
+              {notifStatus && (
+                <div
+                  style={{
+                    marginTop: 8,
+                    fontSize: 12,
+                    lineHeight: 1.5,
+                    color: notifStatus.tone === 'error' ? COLORS.danger : notifStatus.tone === 'success' ? COLORS.success : COLORS.textSecondary,
+                  }}
+                >
+                  {notifStatus.message}
+                </div>
+              )}
             </Card>
 
             {/* Feature 24: refuel interval reminder settings */}
             <Card>
               <SectionTitle icon="⏱️">Refuel interval reminder</SectionTitle>
               <div style={{ color: COLORS.textSecondary, fontSize: 13, marginBottom: 10 }}>
-                Show a reminder banner on the dashboard if you haven't logged a refuel in this many days.
+                Show a reminder banner on the dashboard if you haven&apos;t logged a refuel in this many days.
               </div>
               <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
                 <Input
@@ -3821,12 +3662,52 @@ export default function App() {
               )}
             </Card>
 
+            {/* Storage meter — the quota is the practical limit on receipt photos. */}
+            <Card>
+              <SectionTitle icon="🗄️">Device storage</SectionTitle>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: COLORS.textSecondary, marginBottom: 6 }}>
+                <span>Used by FuelPilot</span>
+                <strong style={{ color: storageUsedRatio > 0.8 ? COLORS.danger : COLORS.textPrimary }}>
+                  {formatBytes(storageUsedBytes)} / ~{formatBytes(STORAGE_BUDGET_BYTES)}
+                </strong>
+              </div>
+              <div style={{ background: COLORS.border, borderRadius: 999, height: 6, overflow: 'hidden' }}>
+                <div
+                  style={{
+                    height: '100%',
+                    width: `${Math.min(storageUsedRatio * 100, 100)}%`,
+                    background: storageUsedRatio > 0.8 ? COLORS.danger : storageUsedRatio > 0.6 ? COLORS.warning : COLORS.success,
+                    borderRadius: 999,
+                  }}
+                />
+              </div>
+              <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 8, lineHeight: 1.5 }}>
+                {photoCount > 0
+                  ? `${photoCount} receipt photo(s) stored. Photos dominate the budget — remove old ones if you run low.`
+                  : 'Receipt photos are compressed before saving, but they still use most of this budget.'}
+              </div>
+              {photoCount > 0 && (
+                <Button
+                  type="button"
+                  variant="danger"
+                  size="small"
+                  style={{ width: '100%', marginTop: 10 }}
+                  onClick={() => setConfirmClearPhotos(true)}
+                >
+                  🖼️ Remove all receipt photos
+                </Button>
+              )}
+            </Card>
+
             {/* Re-show onboarding */}
             <Card>
               <SectionTitle icon="ℹ️">Help</SectionTitle>
               <Button type="button" variant="secondary" onClick={() => { setOnboarded(false); setOnboardStep(0); }} style={{ width: '100%' }}>
                 📖 Show onboarding again
               </Button>
+              <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 10, textAlign: 'center' }}>
+                FuelPilot v{APP_VERSION} · all data stays on this device
+              </div>
             </Card>
 
             <Card>
@@ -3869,7 +3750,7 @@ export default function App() {
           right: 0,
           background: `${COLORS.surface}f0`,
           borderTop: `1px solid ${COLORS.border}`,
-          padding: `6px 10px calc(6px + env(safe-area-inset-bottom))`,
+          padding: `6px calc(10px + env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) calc(10px + env(safe-area-inset-left))`,
           backdropFilter: 'blur(16px)',
           WebkitBackdropFilter: 'blur(16px)',
         }}
@@ -4027,10 +3908,19 @@ export default function App() {
                   type="file"
                   accept="image/*"
                   capture="environment"
-                  onChange={(e) => readPhotoFile(e.target.files?.[0], (data) => setEditRefuelForm((prev) => ({ ...prev, photo: data })))}
+                  onChange={(e) => {
+                    readPhotoFile(e.target.files?.[0], (data) => setEditRefuelForm((prev) => ({ ...prev, photo: data })));
+                    e.target.value = '';
+                  }}
                 />
               )}
+              {photoError && <div style={{ color: COLORS.danger, fontSize: 12, marginTop: 6 }}>{photoError}</div>}
             </div>
+            {editRefuelError && (
+              <div role="alert" style={{ color: COLORS.danger, fontSize: 13, background: COLORS.dangerBg, border: `1px solid ${COLORS.danger}44`, borderRadius: 10, padding: '8px 12px' }}>
+                {editRefuelError}
+              </div>
+            )}
             <Button onClick={saveEditRefuel} style={{ width: '100%', marginTop: 4 }}>Save changes</Button>
           </div>
         )}
@@ -4199,6 +4089,17 @@ export default function App() {
         onCancel={() => setDeleteVehicleId(null)}
       />
 
+      {/* Remove receipt photos — the practical way to reclaim storage */}
+      <ConfirmDialog
+        open={confirmClearPhotos}
+        title="Remove receipt photos"
+        message={`This removes ${photoCount} receipt photo(s) from every refuel entry. The refuel records themselves are kept.`}
+        confirmLabel="Remove photos"
+        confirmVariant="danger"
+        onConfirm={removeAllPhotos}
+        onCancel={() => setConfirmClearPhotos(false)}
+      />
+
       {/* Clear All Confirm */}
       <ConfirmDialog
         open={confirmClearAll}
@@ -4207,11 +4108,17 @@ export default function App() {
         confirmLabel="Clear everything"
         confirmVariant="danger"
         onConfirm={() => {
+          // Odometer readings and per-vehicle targets used to survive a "clear
+          // everything", so stale rows reappeared against the next vehicle.
           setVehicles([]);
           setRefuels([]);
           setMaintenance([]);
+          setOdometerReadings([]);
+          setVehicleConsumptionTargets({});
           setSelectedVehicleId('');
+          removeKey(DRAFT_REFUEL_KEY);
           setConfirmClearAll(false);
+          showUndoToast('All data cleared', null);
         }}
         onCancel={() => setConfirmClearAll(false)}
       />

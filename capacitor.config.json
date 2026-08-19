@@ -1,5 +1,26 @@
 {
   "appId": "com.petrb.fuelpilot",
   "appName": "FuelPilot",
-  "webDir": "dist"
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false
+  },
+  "server": {
+    "_comment": "Capacitor's default since v4. Stated explicitly because changing it later would change the WebView origin and orphan every user's saved data.",
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchAutoHide": true,
+      "launchShowDuration": 500,
+      "backgroundColor": "#0A0A0A",
+      "androidSplashResourceName": "splash",
+      "androidScaleType": "CENTER_CROP",
+      "showSpinner": false
+    },
+    "LocalNotifications": {
+      "iconColor": "#3B82F6"
+    }
+  }
 }

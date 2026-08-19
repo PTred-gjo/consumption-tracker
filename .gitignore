@@ -3,3 +3,11 @@ dist/
 .vscode/
 .DS_Store
 *.log
+
+# Android release signing material
+*.jks
+*.keystore
+android/keystore.properties
+
+# Test output
+coverage/
