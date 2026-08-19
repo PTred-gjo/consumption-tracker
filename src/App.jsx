@@ -2846,7 +2846,7 @@ export default function App() {
                     accent={COLORS.danger}
                   />
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
                   <StatBox
                     label="Avg dist/fill"
                     value={filteredStats.avgDistancePerFill > 0 ? `${fmt(filteredStats.avgDistancePerFill, 0)} km` : '-'}
@@ -2858,6 +2858,20 @@ export default function App() {
                     value={`${fmt(filteredStats.totalLiters, 0)} L`}
                     icon="⛽"
                     accent={COLORS.accent}
+                  />
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <StatBox
+                    label="Full Fills"
+                    value={String(filteredStats.fullFillCount)}
+                    icon="🟢"
+                    accent={COLORS.accent}
+                  />
+                  <StatBox
+                    label="Partial Fills"
+                    value={String(filteredStats.partialFillCount)}
+                    icon="🟡"
+                    accent={COLORS.warning}
                   />
                 </div>
                 {/* Feature 7: CO₂ per filtered period */}
@@ -2928,13 +2942,26 @@ export default function App() {
             <ChartCard
               key={`consumption-${theme}`}
               title="Consumption trend (l/100 km)"
-              labels={filteredStats.consumptionSeries.map((x) => x.date.slice(5))}
-              values={filteredStats.consumptionSeries.map((x) => Number(fmt(x.value, 2)))}
+              labels={filteredStats.allFillsConsumptionSeries.map((x) => x.date.slice(5))}
+              values={filteredStats.allFillsConsumptionSeries.map((x) => Number(fmt(x.value, 2)))}
               type="line"
               color={COLORS.accent}
               unit="l/100km"
               goalLine={consumptionTarget > 0 ? { value: consumptionTarget, label: `Target ${consumptionTarget} l/100`, color: COLORS.danger } : undefined}
+              pointColors={filteredStats.allFillsConsumptionSeries.map((x) => x.isFullTank ? null : COLORS.warning)}
             />
+            {filteredStats.partialFillCount > 0 && filteredStats.allFillsConsumptionSeries.length > 0 && (
+              <div style={{ display: 'flex', gap: 14, fontSize: 11, color: COLORS.textSecondary, paddingLeft: 4, marginTop: -8 }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: '50%', background: COLORS.accent, display: 'inline-block' }} />
+                  Full fill
+                </span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: '50%', background: COLORS.warning, display: 'inline-block' }} />
+                  Partial fill
+                </span>
+              </div>
+            )}
             <ChartCard
               key={`monthly-cost-${theme}`}
               title="Monthly fuel cost"

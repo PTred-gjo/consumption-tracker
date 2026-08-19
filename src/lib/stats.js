@@ -152,9 +152,32 @@ export function computeConsumptionSeries(refuels) {
   return { points: rollingPoints, isRolling: rollingPoints.length > 0 };
 }
 
+/**
+ * Per-fill consumption series: one point per fill (from the second onward),
+ * using the instantaneous interval `liters / (odometer_delta) * 100`.
+ * Each point is tagged with `isFullTank` so the chart can colour them.
+ */
+export function computeAllFillsConsumptionSeries(refuels) {
+  const points = [];
+  for (let i = 1; i < refuels.length; i++) {
+    const distance = refuels[i].odometer - refuels[i - 1].odometer;
+    if (distance <= 0) continue;
+    points.push({
+      date: refuels[i].date,
+      odometer: refuels[i].odometer,
+      value: (refuels[i].liters / distance) * 100,
+      liters: refuels[i].liters,
+      distance,
+      isFullTank: refuels[i].isFullTank,
+    });
+  }
+  return points;
+}
+
 export function emptyStats() {
   return {
     consumptionSeries: [],
+    allFillsConsumptionSeries: [],
     avgConsumption: 0,
     isEstimatedConsumption: false,
     bestConsumption: 0,
@@ -173,6 +196,8 @@ export function emptyStats() {
     totalLiters: 0,
     totalCo2: 0,
     refuelCount: 0,
+    fullFillCount: 0,
+    partialFillCount: 0,
   };
 }
 
@@ -271,8 +296,14 @@ export function computeStats(refuels) {
   const monthlyCost = Array.from(monthlyCostMap, ([month, value]) => ({ month, value })).sort(byMonth);
   const monthlyDistance = Array.from(monthlyDistanceMap, ([month, value]) => ({ month, value })).sort(byMonth);
 
+  const allFillsConsumptionSeries = computeAllFillsConsumptionSeries(refuels);
+
+  const fullFillCount = refuels.filter((r) => r.isFullTank).length;
+  const partialFillCount = refuels.length - fullFillCount;
+
   return {
     consumptionSeries,
+    allFillsConsumptionSeries,
     avgConsumption,
     isEstimatedConsumption,
     bestConsumption,
@@ -291,6 +322,8 @@ export function computeStats(refuels) {
     totalLiters,
     totalCo2,
     refuelCount: refuels.length,
+    fullFillCount,
+    partialFillCount,
   };
 }
 
