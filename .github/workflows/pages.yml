@@ -33,10 +33,6 @@ jobs:
       - name: Configure Pages
         id: pages
         uses: actions/configure-pages@v5
-        with:
-          # Turns Pages on the first time this runs, so no manual settings
-          # change is needed before the policy URL goes live.
-          enablement: true
 
       - run: npm ci
 
