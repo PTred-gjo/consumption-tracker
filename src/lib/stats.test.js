@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  computeAllFillsConsumptionSeries,
   computeConsumptionSeries,
   computeRefuelWarnings,
   computeStats,
@@ -201,6 +202,32 @@ describe('computeConsumptionSeries', () => {
   });
 });
 
+describe('computeAllFillsConsumptionSeries', () => {
+  it('skips non-increasing odometer intervals and tags each point with fill type', () => {
+    const entries = [
+      refuel({ odometer: 1000, liters: 40, isFullTank: true }),
+      refuel({ odometer: 1200, liters: 20, isFullTank: false }),
+      refuel({ odometer: 1200, liters: 10, isFullTank: true }),
+      refuel({ odometer: 1500, liters: 15, isFullTank: true }),
+    ];
+
+    const points = computeAllFillsConsumptionSeries(entries);
+    expect(points).toHaveLength(2);
+    expect(points[0]).toMatchObject({
+      distance: 200,
+      liters: 20,
+      isFullTank: false,
+    });
+    expect(points[0].value).toBeCloseTo(10, 6);
+    expect(points[1]).toMatchObject({
+      distance: 300,
+      liters: 15,
+      isFullTank: true,
+    });
+    expect(points[1].value).toBeCloseTo(5, 6);
+  });
+});
+
 describe('computeStats', () => {
   it('returns a complete zeroed shape for an empty history', () => {
     const stats = computeStats([]);
@@ -278,6 +305,21 @@ describe('computeStats', () => {
       refuel({ odometer: 1500, isFullTank: true }),
     ];
     expect(computeStats(entries).isEstimatedConsumption).toBe(false);
+  });
+
+  it('reports full and partial fill counts and exposes the per-fill series', () => {
+    const entries = [
+      refuel({ odometer: 1000, isFullTank: true }),
+      refuel({ odometer: 1200, liters: 20, isFullTank: false }),
+      refuel({ odometer: 1500, liters: 15, isFullTank: false }),
+      refuel({ odometer: 1800, liters: 30, isFullTank: true }),
+    ];
+    const stats = computeStats(entries);
+
+    expect(stats.fullFillCount).toBe(2);
+    expect(stats.partialFillCount).toBe(2);
+    expect(stats.allFillsConsumptionSeries).toHaveLength(3);
+    expect(stats.allFillsConsumptionSeries.map((p) => p.isFullTank)).toEqual([false, false, true]);
   });
 });
 
