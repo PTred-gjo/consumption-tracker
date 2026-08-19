@@ -153,11 +153,12 @@ tests cannot: that it mounts, that a refuel entered through the form yields the
 right consumption figure, that every tab renders, and that data survives a
 reload.
 
-Two GitHub Actions workflows run automatically:
+Four GitHub Actions workflows run automatically:
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, PRs | Lint, unit tests, web build, PWA asset check, browser smoke test, debug APK |
+| `ci.yml` | push to `main`, PRs, `workflow_dispatch` | Lint, unit tests, web build, PWA asset check, browser smoke test |
+| `build-android-apk.yml` | push to `main`, push to `copilot/**`, `workflow_dispatch` | Builds and uploads a debug APK for merges and Copilot branches |
 | `pages.yml` | push to `main` | Deploys the PWA and the privacy policy to GitHub Pages |
 | `release.yml` | `v*` tags | Verifies the tag matches `package.json`, builds a signed AAB and APK, attaches them to a GitHub release |
 
@@ -166,7 +167,8 @@ Two GitHub Actions workflows run automatically:
 ```
 fuelpilot/
 ├── .github/workflows/
-│   ├── ci.yml                  # Lint, test, build, debug APK
+│   ├── ci.yml                  # Lint, test and web verification
+│   ├── build-android-apk.yml   # Debug APK on merges and Copilot branches
 │   └── release.yml             # Signed AAB/APK on version tags
 ├── android/                    # Capacitor Android project
 ├── docs/
@@ -493,7 +495,8 @@ UI patterns:
 > Ship it.
 
 - [x] Capacitor Android build
-- [x] GitHub Actions CI (`.github/workflows/ci.yml`) — lint, unit tests, web build and debug APK
+- [x] GitHub Actions CI (`.github/workflows/ci.yml`) — lint, unit tests and web build
+- [x] GitHub Actions APK build (`.github/workflows/build-android-apk.yml`) — debug APK on merges and Copilot branches
 - [x] Signed release pipeline (`.github/workflows/release.yml`) — AAB and APK on version tags
 - [x] Onboarding flow (first vehicle setup wizard)
 - [x] PWA manifest (`public/manifest.json`) with home-screen shortcuts
