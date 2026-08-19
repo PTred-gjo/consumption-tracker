@@ -56,7 +56,8 @@ export function getVehicleRefuels(refuels, vehicleId) {
       const hasTotalCost =
         rawTotalCost !== undefined &&
         rawTotalCost !== null &&
-        String(rawTotalCost).trim() !== '';
+        String(rawTotalCost).trim() !== '' &&
+        Number.isFinite(Number(rawTotalCost));
       const totalCost = hasTotalCost ? num(rawTotalCost) : liters * pricePerLiter;
       const rawIsFullTank = entry.isFullTank;
       const isFullTank = rawIsFullTank == null

@@ -127,6 +127,13 @@ describe('getVehicleRefuels', () => {
     expect(entry.totalCost).toBe(0);
     expect(entry.isFullTank).toBe(false);
   });
+
+  it('derives total cost when a legacy totalCost string is not numeric', () => {
+    const [entry] = getVehicleRefuels([
+      refuel({ liters: '40.5', pricePerLiter: '39.9', totalCost: 'NaN' }),
+    ], 'v1');
+    expect(entry.totalCost).toBeCloseTo(1615.95, 6);
+  });
 });
 
 describe('getCurrentOdometer', () => {
