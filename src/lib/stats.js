@@ -62,7 +62,7 @@ export function getVehicleRefuels(refuels, vehicleId) {
       const isFullTank = rawIsFullTank == null
         ? true
         : (typeof rawIsFullTank === 'string'
-            ? !['false', '0', 'no', 'partial'].includes(rawIsFullTank.toLowerCase())
+            ? !['false', '0', 'no', 'partial'].includes(rawIsFullTank.trim().toLowerCase())
             : Boolean(rawIsFullTank));
       const rawCreatedAt = entry.createdAt;
       const createdAt = rawCreatedAt == null || String(rawCreatedAt).trim() === '' ? 0 : num(rawCreatedAt);
