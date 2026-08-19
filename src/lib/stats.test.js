@@ -119,6 +119,14 @@ describe('getVehicleRefuels', () => {
     expect(entry.totalCost).toBeCloseTo(1615.95, 6);
     expect(entry.isFullTank).toBe(true);
   });
+
+  it('preserves explicit zero total cost and parses string full-tank flags', () => {
+    const [entry] = getVehicleRefuels([
+      refuel({ totalCost: 0, isFullTank: 'false' }),
+    ], 'v1');
+    expect(entry.totalCost).toBe(0);
+    expect(entry.isFullTank).toBe(false);
+  });
 });
 
 describe('getCurrentOdometer', () => {
