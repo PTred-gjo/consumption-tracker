@@ -49,6 +49,21 @@ export function uid(prefix) {
 export function getVehicleRefuels(refuels, vehicleId) {
   return refuels
     .filter((x) => x.vehicleId === vehicleId)
+    .map((entry) => {
+      const liters = num(entry.liters);
+      const pricePerLiter = num(entry.pricePerLiter);
+      const totalCost = num(entry.totalCost);
+      return {
+        ...entry,
+        date: String(entry.date || ''),
+        odometer: num(entry.odometer),
+        liters,
+        pricePerLiter,
+        totalCost: totalCost || liters * pricePerLiter,
+        isFullTank: entry.isFullTank !== false,
+        createdAt: num(entry.createdAt),
+      };
+    })
     .slice()
     .sort(
       (a, b) =>
