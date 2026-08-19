@@ -158,6 +158,7 @@ Two GitHub Actions workflows run automatically:
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
 | `ci.yml` | push to `main`, PRs | Lint, unit tests, web build, PWA asset check, browser smoke test, debug APK |
+| `pages.yml` | push to `main` | Deploys the PWA and the privacy policy to GitHub Pages |
 | `release.yml` | `v*` tags | Verifies the tag matches `package.json`, builds a signed AAB and APK, attaches them to a GitHub release |
 
 ## Project Structure
@@ -169,13 +170,18 @@ fuelpilot/
 │   └── release.yml             # Signed AAB/APK on version tags
 ├── android/                    # Capacitor Android project
 ├── docs/
-│   └── PUBLISHING.md           # Release and Play Store guide
+│   ├── PUBLISHING.md           # Release and Play Store guide
+│   └── store/                  # Generated Play listing assets
 ├── public/
 │   ├── manifest.json           # PWA manifest
 │   ├── sw.js                   # Service worker (offline shell)
 │   └── icon-*.png              # Generated icon set
 ├── scripts/
-│   └── generate-icons.mjs      # Regenerates the icons (npm run icons)
+│   ├── generate-icons.mjs      # App and PWA icons (npm run icons)
+│   ├── generate-feature-graphic.mjs   # Play feature graphic
+│   ├── generate-screenshots.mjs       # Play screenshots from the real app
+│   ├── build-privacy-page.mjs  # PRIVACY.md -> hosted privacy.html
+│   └── create-keystore.sh      # Creates the Play upload key
 ├── tests/
 │   └── smoke.mjs               # Browser end-to-end smoke test
 ├── src/
@@ -520,6 +526,9 @@ UI patterns:
 - [x] Real-time cost/km preview — shows estimated cost/km while typing price in the refuel form
 
 ## Privacy
+
+Hosted policy: `https://<owner>.github.io/<repo>/privacy.html` (deployed from
+[PRIVACY.md](PRIVACY.md) on every push to `main`).
 
 FuelPilot collects nothing. Every record stays in your device's local storage,
 there is no account and no server, and the app works with no connection at all.

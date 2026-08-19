@@ -16,9 +16,12 @@ export function registerServiceWorker() {
   // The dev server serves modules that must not be cached.
   if (import.meta.env?.DEV) return;
 
+  // BASE_URL is "/" for the Capacitor bundle and "/<repo>/" for a Pages deploy.
+  const base = import.meta.env?.BASE_URL || '/';
+
   window.addEventListener('load', () => {
     navigator.serviceWorker
-      .register('/sw.js')
+      .register(`${base}sw.js`, { scope: base })
       .then((registration) => {
         registration.addEventListener('updatefound', () => {
           const installing = registration.installing;

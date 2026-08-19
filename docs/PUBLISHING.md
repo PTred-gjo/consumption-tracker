@@ -15,16 +15,18 @@ That upload key must never change or be lost — losing it means you cannot ship
 another update under the same listing.
 
 ```bash
-keytool -genkey -v \
-  -keystore upload.jks \
-  -keyalg RSA -keysize 2048 -validity 10000 \
-  -alias fuelpilot
+./scripts/create-keystore.sh
 ```
 
-Store `upload.jks` and both passwords in a password manager. Back them up
-somewhere that is not this repository — `.gitignore` deliberately blocks
-`*.jks`, `*.keystore` and `android/keystore.properties` from ever being
-committed.
+The script creates the keystore, locks its permissions and prints the exact
+values to put in `android/keystore.properties` and in the CI secrets.
+
+Run it on a machine you control. Do not generate the key in a throwaway
+environment, and never paste the keystore or its passwords into a chat, an
+issue or a commit — `.gitignore` blocks `*.jks`, `*.keystore` and
+`android/keystore.properties`, but that only guards this repository.
+
+Store the file and both passwords in a password manager and back them up.
 
 ### 1.2 Point local builds at the key
 
@@ -53,12 +55,19 @@ In **Settings → Secrets and variables → Actions**:
 | `ANDROID_KEY_ALIAS` | `fuelpilot` |
 | `ANDROID_KEY_PASSWORD` | the key password |
 
-### 1.4 Host the privacy policy
+### 1.4 The privacy policy URL
 
-Play requires a publicly reachable privacy policy URL for every app.
-[`PRIVACY.md`](../PRIVACY.md) is written to serve as one. Publish it somewhere
-stable — GitHub Pages off this repository is enough — and paste that URL into
-the Play Console listing.
+Play requires a publicly reachable privacy policy URL for every app. This is
+already automated: `.github/workflows/pages.yml` deploys the app and the policy
+to GitHub Pages on every push to `main`, and enables Pages on its first run.
+
+    https://<owner>.github.io/<repo>/privacy.html
+
+The page is generated from [`PRIVACY.md`](../PRIVACY.md) during the build
+(`npm run build:privacy`), so the hosted copy can never fall behind the file in
+the repository. Paste that URL into the Play Console listing.
+
+The same deploy publishes the installable PWA at `https://<owner>.github.io/<repo>/`.
 
 ---
 
@@ -112,10 +121,10 @@ What you still have to supply in the console:
 - [ ] **Privacy policy URL** — see 1.4
 - [ ] **Data safety form** — declare *no data collected* and *no data shared*.
       This is accurate: nothing leaves the device.
-- [ ] **Store listing** — title, short and full description, feature graphic
-      (1024×500), and at least two phone screenshots
-- [ ] **App icon** — 512×512 PNG. Use `public/icon-512.png`, or regenerate the
-      set with `npm run icons`
+- [x] **Graphic assets** — generated into `docs/store/`:
+      feature graphic (1024×500), seven phone screenshots (1080×1920) and the
+      512×512 icon. Rebuild any time with `npm run store:assets`
+- [ ] **Store listing text** — title, short and full description (copy below)
 - [ ] **Content rating questionnaire** — a utility with no user-generated
       content or ads rates as *Everyone*
 - [ ] **Target audience** — not directed at children
@@ -148,22 +157,25 @@ What you still have to supply in the console:
 
 ## 4. Publishing as a PWA
 
-The web build in `dist/` is a static site and can go on any static host.
+Already automated. `.github/workflows/pages.yml` builds and deploys to GitHub
+Pages on every push to `main`, and the CI build fails if the manifest, service
+worker or icons are missing from `dist`.
+
+To host it somewhere else instead:
 
 ```bash
-npm run build
+npm run build                      # serves from the domain root
+VITE_BASE=/subdir/ npm run build   # serves from a sub-path
 ```
 
 Two requirements for installability:
 
 - **Serve over HTTPS.** Service workers and the install prompt are unavailable
   otherwise (`localhost` is exempt for development).
-- **Serve `sw.js` from the site root** with `Cache-Control: no-cache`, so an
-  updated worker is actually picked up.
-
-CI checks that the manifest, service worker and icons are present in `dist`
-before the build is accepted, since a missing icon silently makes the app
-non-installable.
+- **Serve `sw.js` alongside `index.html`** with `Cache-Control: no-cache`, so an
+  updated worker is actually picked up. The worker derives its own base path
+  from its registration scope, so a sub-path deploy needs no extra
+  configuration.
 
 ---
 

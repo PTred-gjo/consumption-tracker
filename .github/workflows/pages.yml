@@ -1,0 +1,77 @@
+name: Deploy to GitHub Pages
+
+# Publishes the PWA and the privacy policy. Google Play requires a publicly
+# reachable privacy policy URL, which this provides at:
+#   https://<owner>.github.io/<repo>/privacy.html
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel a running deploy; let it finish and queue the next one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+        with:
+          # Turns Pages on the first time this runs, so no manual settings
+          # change is needed before the policy URL goes live.
+          enablement: true
+
+      - run: npm ci
+
+      - name: Build for the Pages sub-path
+        # Pages serves the site from /<repo>/, not the domain root.
+        env:
+          VITE_BASE: ${{ steps.pages.outputs.base_path }}/
+        run: npm run build
+
+      - name: Add SPA fallback and disable Jekyll
+        run: |
+          set -euo pipefail
+          # Pages has no rewrite rules; a copy of index.html as 404.html makes
+          # deep links resolve to the app instead of a Pages error page.
+          cp dist/index.html dist/404.html
+          # Without this, Pages runs Jekyll and drops files beginning with "_".
+          touch dist/.nojekyll
+
+      - name: Verify the privacy policy is in the deploy
+        run: |
+          set -euo pipefail
+          test -s dist/privacy.html || { echo "::error::privacy.html missing"; exit 1; }
+          grep -q "Privacy Policy" dist/privacy.html
+          echo "Privacy policy present."
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

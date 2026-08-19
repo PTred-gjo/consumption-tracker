@@ -12,8 +12,19 @@
 const CACHE_VERSION = 'v1';
 const CACHE_NAME = `fuelpilot-${CACHE_VERSION}`;
 
+/**
+ * Base path the app is served from — "/" under Capacitor, "/<repo>/" on GitHub
+ * Pages. Derived from the registration scope so one worker covers both without
+ * a build step rewriting it.
+ */
+const BASE = new URL(self.registration.scope).pathname;
+const url = (path) => BASE + path;
+
 /** Only files guaranteed to exist; hashed bundles are cached on first request. */
-const PRECACHE_URLS = ['/', '/index.html', '/manifest.json', '/icon-192.png', '/icon-512.png'];
+const PRECACHE_URLS = [
+  url(''), url('index.html'), url('manifest.json'),
+  url('icon-192.png'), url('icon-512.png'),
+];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -21,7 +32,7 @@ self.addEventListener('install', (event) => {
       .open(CACHE_NAME)
       // addAll rejects the whole install if any single URL 404s, so failures are
       // tolerated per-file and the entry is simply fetched later.
-      .then((cache) => Promise.allSettled(PRECACHE_URLS.map((url) => cache.add(url))))
+      .then((cache) => Promise.allSettled(PRECACHE_URLS.map((entry) => cache.add(entry))))
   );
   // Deliberately no skipWaiting() here: taking over immediately would swap the
   // assets under a page that may have a half-filled refuel form open. The page
@@ -55,10 +66,10 @@ self.addEventListener('fetch', (event) => {
       fetch(request)
         .then((response) => {
           const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put('/index.html', copy));
+          caches.open(CACHE_NAME).then((cache) => cache.put(url('index.html'), copy));
           return response;
         })
-        .catch(() => caches.match('/index.html').then((cached) => cached || caches.match('/')))
+        .catch(() => caches.match(url('index.html')).then((cached) => cached || caches.match(url(''))))
     );
     return;
   }

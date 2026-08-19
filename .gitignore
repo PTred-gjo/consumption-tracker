@@ -11,3 +11,6 @@ android/keystore.properties
 
 # Test output
 coverage/
+
+# Generated at build time from PRIVACY.md by scripts/build-privacy-page.mjs
+public/privacy.html

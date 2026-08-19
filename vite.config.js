@@ -6,6 +6,10 @@ import react from '@vitejs/plugin-react';
 const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('./package.json', import.meta.url)), 'utf8'));
 
 export default defineConfig({
+  // GitHub Pages serves the app from /<repo>/, while Capacitor loads it from the
+  // root of the WebView origin. The Pages build sets VITE_BASE; everything else
+  // keeps the default so the Android bundle is unaffected.
+  base: process.env.VITE_BASE || '/',
   plugins: [react()],
   define: {
     // Single source of truth for the version shown in Settings.

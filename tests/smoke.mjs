@@ -158,6 +158,21 @@ const dueSoonCount = body.match(/(\d+)\s*\n\s*DUE SOON/i);
 check('due-soon counter reflects the item', dueSoonCount && Number(dueSoonCount[1]) === 1,
   dueSoonCount ? `counter read ${dueSoonCount[1]}` : 'counter not found');
 
+console.log('\n== Responsive ==');
+// A date-input grid used to force the Stats tab wider than a 320px phone.
+// Sideways scrolling on a phone is a defect, so every tab is measured.
+for (const width of [320, 360]) {
+  await page.setViewportSize({ width, height: 800 });
+  for (const tab of ['refuel', 'stats', 'maintenance', 'settings']) {
+    await page.goto(`${BASE}/?tab=${tab}`, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(600);
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth
+    );
+    check(`no sideways scroll at ${width}px on ${tab}`, overflow <= 0, `overflows by ${overflow}px`);
+  }
+}
+
 console.log('\n== Console ==');
 const realErrors = consoleErrors.filter(
   (e) => !e.includes('favicon') && !e.includes('sw.js') && !e.includes('ServiceWorker')

@@ -73,6 +73,12 @@ let COLORS = { ...DARK_COLORS };
 const SWIPE_CANCEL_THRESHOLD = 5; // px; rightward movement that cancels a swipe
 const SKELETON_DURATION_MS = 200; // ms; how long to show skeleton on first render
 const UNDO_TIMEOUT_MS = 6000;     // ms; how long a delete stays undoable
+/**
+ * Two-column layout that collapses to one when the columns would be too narrow.
+ * Native date inputs have a ~170px intrinsic minimum and cannot shrink below it,
+ * so a fixed `1fr 1fr` pair pushed the page sideways on small phones.
+ */
+const DATE_PAIR_GRID = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 };
 const DRAFT_REFUEL_KEY = 'fuelpilot_draft_refuel';
 /** Browsers allow roughly 5 MB of localStorage per origin. */
 const STORAGE_BUDGET_BYTES = 5 * 1024 * 1024;
@@ -177,6 +183,12 @@ function ensureGlobalStyles() {
   style.id = 'fp-global-styles';
   style.textContent = `
     .${inputClassName}:focus { border-color: ${COLORS.accent} !important; }
+    /* Date and number inputs carry an intrinsic minimum width. As grid items
+       their default min-width:auto refuses to shrink below it, which pushed the
+       Stats tab into horizontal overflow on 320-360px phones. */
+    .${inputClassName}, .fp-select { min-width: 0; }
+    /* A grid/flex item will not shrink below its content unless told to. */
+    div:has(> .${inputClassName}), div:has(> .fp-select) { min-width: 0; }
     .${buttonClassName}:active { transform: scale(0.97); }
     @keyframes fp-fadeIn {
       from { opacity: 0; transform: translateY(5px); }
@@ -228,13 +240,16 @@ function Input({ style: extraStyle, ...props }) {
   );
 }
 
-function Select({ children, ...props }) {
+function Select({ children, style: extraStyle, ...props }) {
+  ensureGlobalStyles();
   return (
     <select
       {...props}
+      className="fp-select"
       style={{
         width: '100%',
         boxSizing: 'border-box',
+        minWidth: 0,
         border: `1px solid ${COLORS.border}`,
         background: COLORS.surfaceElevated,
         color: COLORS.textPrimary,
@@ -243,6 +258,7 @@ function Select({ children, ...props }) {
         padding: '10px 12px',
         outline: 'none',
         transition: 'border-color 0.2s',
+        ...extraStyle,
       }}
     >
       {children}
@@ -361,12 +377,16 @@ function StatBox({ label, value, icon, accent, trend, sub }) {
         background: `${c}0d`,
         border: `1px solid ${c}22`,
         borderRadius: 12,
-        padding: '12px 14px',
+        padding: '12px 10px',
         textAlign: 'center',
+        // A grid item defaults to min-width:auto and refuses to shrink below its
+        // content, which pushed the third summary tile off a 360px screen.
+        minWidth: 0,
+        overflowWrap: 'anywhere',
       }}
     >
       {icon && <div style={{ fontSize: 20, marginBottom: 4 }}>{icon}</div>}
-      <div style={{ fontSize: 18, fontWeight: 800, color: c, lineHeight: 1.2 }}>{value}</div>
+      <div style={{ fontSize: 17, fontWeight: 800, color: c, lineHeight: 1.25 }}>{value}</div>
       <div style={{ fontSize: 11, color: COLORS.textSecondary, marginTop: 3, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
       {sub && <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 3 }}>{sub}</div>}
       {trend && (
@@ -543,10 +563,17 @@ function ChartCard({ title, labels, values, type = 'line', color = COLORS.accent
   const isEmpty = !values || values.length === 0;
 
   return (
-    <Card>
+    <Card style={{ minWidth: 0 }}>
       <SectionTitle>{title}</SectionTitle>
-      <div style={{ height: 220, position: 'relative' }}>
-        <canvas ref={ref} role="img" aria-label={`${title} chart`} />
+      {/* A canvas defaults to 300px wide. Without these constraints the card
+          grows to fit it and pushes the whole page past a 320px screen. */}
+      <div style={{ height: 220, position: 'relative', minWidth: 0, width: '100%' }}>
+        <canvas
+          ref={ref}
+          role="img"
+          aria-label={`${title} chart`}
+          style={{ display: 'block', width: '100%', maxWidth: '100%' }}
+        />
         {isEmpty && (
           <div
             style={{
@@ -2599,7 +2626,7 @@ export default function App() {
                       onChange={(e) => setHistorySearch(e.target.value)}
                     />
                   </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <div style={DATE_PAIR_GRID}>
                     <div>
                       <Label>Date from</Label>
                       <Input type="date" value={historyDateFrom} onChange={(e) => setHistoryDateFrom(e.target.value)} />
@@ -2733,7 +2760,7 @@ export default function App() {
             {/* ── Date range filter ── */}
             <Card style={{ padding: '12px 14px' }}>
               <SectionTitle icon="📅">Date range filter</SectionTitle>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+              <div style={{ ...DATE_PAIR_GRID, marginBottom: 8 }}>
                 <div>
                   <Label>From</Label>
                   <Input type="date" value={rangeFrom} onChange={(e) => setRangeFrom(e.target.value)} />
@@ -3748,6 +3775,10 @@ export default function App() {
           bottom: 0,
           left: 0,
           right: 0,
+          // Without this the swipeable history rows (position: relative,
+          // zIndex: 1) paint over the navigation as the list scrolls past it.
+          // Stays below the modal (9999) and toast (99999) layers.
+          zIndex: 100,
           background: `${COLORS.surface}f0`,
           borderTop: `1px solid ${COLORS.border}`,
           padding: `6px calc(10px + env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) calc(10px + env(safe-area-inset-left))`,

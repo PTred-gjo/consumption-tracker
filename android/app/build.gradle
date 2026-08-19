@@ -13,8 +13,12 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
 }
 
+// Returns null for anything blank. CI passes an empty string when no signing
+// secret is configured, and an empty string is not null — handing that to
+// file() aborts project evaluation before compileSdk is ever applied.
 def resolveSigning = { String propKey, String envKey ->
-    keystoreProperties.getProperty(propKey) ?: System.getenv(envKey)
+    def value = keystoreProperties.getProperty(propKey) ?: System.getenv(envKey)
+    return (value != null && !value.trim().isEmpty()) ? value.trim() : null
 }
 
 def storeFilePath = resolveSigning('storeFile', 'FUELPILOT_KEYSTORE_FILE')
