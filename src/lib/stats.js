@@ -49,6 +49,35 @@ export function uid(prefix) {
 export function getVehicleRefuels(refuels, vehicleId) {
   return refuels
     .filter((x) => x.vehicleId === vehicleId)
+    .map((entry) => {
+      const liters = num(entry.liters);
+      const pricePerLiter = num(entry.pricePerLiter);
+      const rawTotalCost = entry.totalCost;
+      const hasTotalCost =
+        rawTotalCost !== undefined &&
+        rawTotalCost !== null &&
+        String(rawTotalCost).trim() !== '' &&
+        Number.isFinite(Number(rawTotalCost));
+      const totalCost = hasTotalCost ? num(rawTotalCost) : liters * pricePerLiter;
+      const rawIsFullTank = entry.isFullTank;
+      const isFullTank = rawIsFullTank == null
+        ? true
+        : (typeof rawIsFullTank === 'string'
+            ? !['false', '0', 'no', 'partial'].includes(rawIsFullTank.trim().toLowerCase())
+            : Boolean(rawIsFullTank));
+      const rawCreatedAt = entry.createdAt;
+      const createdAt = rawCreatedAt == null || String(rawCreatedAt).trim() === '' ? 0 : num(rawCreatedAt);
+      return {
+        ...entry,
+        date: entry.date == null ? '' : String(entry.date),
+        odometer: num(entry.odometer),
+        liters,
+        pricePerLiter,
+        totalCost,
+        isFullTank,
+        createdAt,
+      };
+    })
     .slice()
     .sort(
       (a, b) =>

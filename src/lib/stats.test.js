@@ -101,6 +101,39 @@ describe('getVehicleRefuels', () => {
     ];
     expect(getVehicleRefuels(entries, 'v1').map((r) => r.id)).toEqual(['a', 'b']);
   });
+
+  it('normalizes legacy values so downstream stats remain numeric', () => {
+    const [entry] = getVehicleRefuels([
+      refuel({
+        odometer: '2000',
+        liters: '40.5',
+        pricePerLiter: '39.9',
+        totalCost: '',
+        isFullTank: undefined,
+      }),
+    ], 'v1');
+
+    expect(entry.odometer).toBe(2000);
+    expect(entry.liters).toBe(40.5);
+    expect(entry.pricePerLiter).toBe(39.9);
+    expect(entry.totalCost).toBeCloseTo(1615.95, 6);
+    expect(entry.isFullTank).toBe(true);
+  });
+
+  it('preserves explicit zero total cost and parses string full-tank flags', () => {
+    const [entry] = getVehicleRefuels([
+      refuel({ totalCost: 0, isFullTank: 'false' }),
+    ], 'v1');
+    expect(entry.totalCost).toBe(0);
+    expect(entry.isFullTank).toBe(false);
+  });
+
+  it('derives total cost when a legacy totalCost string is not numeric', () => {
+    const [entry] = getVehicleRefuels([
+      refuel({ liters: '40.5', pricePerLiter: '39.9', totalCost: 'NaN' }),
+    ], 'v1');
+    expect(entry.totalCost).toBeCloseTo(1615.95, 6);
+  });
 });
 
 describe('getCurrentOdometer', () => {
