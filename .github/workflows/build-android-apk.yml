@@ -43,16 +43,6 @@ jobs:
       - name: Build web app and sync Capacitor
         run: npm run build:android
 
-      - name: Cache Gradle
-        if: github.event_name != 'workflow_run'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle', 'android/gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: gradle-${{ runner.os }}-
-
       - name: Build debug APK
         working-directory: android
         run: ./gradlew --no-daemon assembleDebug
