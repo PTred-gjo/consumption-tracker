@@ -2938,18 +2938,25 @@ export default function App() {
               );
             })()}
 
-            {/* ── Consumption chart (with optional goal line) ── */}
-            <ChartCard
-              key={`consumption-${theme}`}
-              title="Consumption trend (l/100 km)"
-              labels={filteredStats.allFillsConsumptionSeries.map((x) => x.date.slice(5))}
-              values={filteredStats.allFillsConsumptionSeries.map((x) => Number(fmt(x.value, 2)))}
-              type="line"
-              color={COLORS.accent}
-              unit="l/100km"
-              goalLine={consumptionTarget > 0 ? { value: consumptionTarget, label: `Target ${consumptionTarget} l/100`, color: COLORS.danger } : undefined}
-              pointColors={filteredStats.allFillsConsumptionSeries.map((x) => x.isFullTank ? null : COLORS.warning)}
-            />
+            {/* ── Per-fill chart (target only when values represent consumption) ── */}
+            {(() => {
+              const hasPartialFillPoints = filteredStats.partialFillCount > 0;
+              return (
+                <ChartCard
+                  key={`consumption-${theme}`}
+                  title={hasPartialFillPoints ? 'Fuel added per distance trend (l/100 km)' : 'Consumption trend (l/100 km)'}
+                  labels={filteredStats.allFillsConsumptionSeries.map((x) => x.date.slice(5))}
+                  values={filteredStats.allFillsConsumptionSeries.map((x) => Number(fmt(x.value, 2)))}
+                  type="line"
+                  color={COLORS.accent}
+                  unit="l/100km"
+                  goalLine={!hasPartialFillPoints && consumptionTarget > 0
+                    ? { value: consumptionTarget, label: `Target ${consumptionTarget} l/100`, color: COLORS.danger }
+                    : undefined}
+                  pointColors={filteredStats.allFillsConsumptionSeries.map((x) => x.isFullTank ? null : COLORS.warning)}
+                />
+              );
+            })()}
             {filteredStats.partialFillCount > 0 && filteredStats.allFillsConsumptionSeries.length > 0 && (
               <div style={{ display: 'flex', gap: 14, fontSize: 11, color: COLORS.textSecondary, paddingLeft: 4, marginTop: -8 }}>
                 <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>

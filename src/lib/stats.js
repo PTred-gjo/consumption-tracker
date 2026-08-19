@@ -153,8 +153,9 @@ export function computeConsumptionSeries(refuels) {
 }
 
 /**
- * Per-fill consumption series: one point per fill (from the second onward),
+ * Per-fill fuel-added series: one point per fill (from the second onward),
  * using the instantaneous interval `liters / (odometer_delta) * 100`.
+ * This reflects fuel added per distance between fills, not physical consumption.
  * Each point is tagged with `isFullTank` so the chart can colour them.
  */
 export function computeAllFillsConsumptionSeries(refuels) {
