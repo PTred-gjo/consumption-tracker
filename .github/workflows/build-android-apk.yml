@@ -2,28 +2,24 @@ name: Build Android APK
 
 on:
   push:
-    branches: [main]
-  workflow_run:
-    workflows: ['Copilot cloud agent']
-    types: [completed]
+    branches:
+      - main
+      - 'copilot/**'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: apk-${{ github.event_name }}-${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || github.sha }}
+  group: apk-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build-apk:
     name: Build debug APK
     runs-on: ubuntu-latest
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
       - uses: actions/setup-node@v4
         with:
